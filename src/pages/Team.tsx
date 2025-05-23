@@ -1,9 +1,8 @@
-
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Plus, Upload, Calendar, Clock, Users, MessageSquare, FileText } from "lucide-react";
+import { Plus, Upload, Calendar, Clock, Users, MessageSquare, FileText, Settings, UserPlus, BarChart3 } from "lucide-react";
 import { Link } from "react-router-dom";
 
 const Team = () => {
@@ -75,22 +74,42 @@ const Team = () => {
           </Link>
         </div>
         <div className="flex items-center space-x-4">
-          <Button variant="outline">
-            <Plus className="w-4 h-4 mr-2" />
-            Invite Member
-          </Button>
-          <Button>
-            <Upload className="w-4 h-4 mr-2" />
-            Upload Meeting
-          </Button>
+          <Link to="/invite-members">
+            <Button variant="outline">
+              <UserPlus className="w-4 h-4 mr-2" />
+              Invite Member
+            </Button>
+          </Link>
+          <Link to="/meeting-upload">
+            <Button>
+              <Upload className="w-4 h-4 mr-2" />
+              Upload Meeting
+            </Button>
+          </Link>
         </div>
       </nav>
 
       <div className="px-6 py-8 max-w-7xl mx-auto">
         {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">Team Dashboard</h1>
-          <p className="text-gray-600">Manage your team and track meeting insights</p>
+        <div className="mb-8 flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900 mb-2">Team Dashboard</h1>
+            <p className="text-gray-600">Manage your team and track meeting insights</p>
+          </div>
+          <div className="flex space-x-2">
+            <Link to="/team-settings">
+              <Button variant="outline">
+                <Settings className="w-4 h-4 mr-2" />
+                Settings
+              </Button>
+            </Link>
+            <Link to="/integrations">
+              <Button variant="outline">
+                <BarChart3 className="w-4 h-4 mr-2" />
+                Integrations
+              </Button>
+            </Link>
+          </div>
         </div>
 
         {/* Stats Cards */}
@@ -147,9 +166,11 @@ const Team = () => {
               <CardHeader>
                 <CardTitle className="flex items-center justify-between">
                   Team Members
-                  <Button size="sm" variant="outline">
-                    <Plus className="w-4 h-4" />
-                  </Button>
+                  <Link to="/member-management">
+                    <Button size="sm" variant="outline">
+                      Manage
+                    </Button>
+                  </Link>
                 </CardTitle>
                 <CardDescription>Manage your team and their roles</CardDescription>
               </CardHeader>
@@ -179,10 +200,19 @@ const Team = () => {
               <CardHeader>
                 <CardTitle className="flex items-center justify-between">
                   Recent Meetings
-                  <Button size="sm">
-                    <Upload className="w-4 h-4 mr-2" />
-                    Upload New
-                  </Button>
+                  <div className="flex space-x-2">
+                    <Link to="/meeting-management">
+                      <Button size="sm" variant="outline">
+                        View All
+                      </Button>
+                    </Link>
+                    <Link to="/meeting-upload">
+                      <Button size="sm">
+                        <Upload className="w-4 h-4 mr-2" />
+                        Upload New
+                      </Button>
+                    </Link>
+                  </div>
                 </CardTitle>
                 <CardDescription>Your team's latest standup recordings and insights</CardDescription>
               </CardHeader>
@@ -211,9 +241,11 @@ const Team = () => {
                     </div>
                     <p className="text-sm text-gray-600 mt-2">{meeting.summary}</p>
                     <div className="flex space-x-2 mt-3">
-                      <Button size="sm" variant="outline">View Transcript</Button>
+                      <Link to="/meeting-details">
+                        <Button size="sm" variant="outline">View Details</Button>
+                      </Link>
+                      <Button size="sm" variant="outline">Transcript</Button>
                       <Button size="sm" variant="outline">Action Items</Button>
-                      <Button size="sm" variant="outline">Summary</Button>
                     </div>
                   </div>
                 ))}
