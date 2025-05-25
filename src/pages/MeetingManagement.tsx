@@ -1,14 +1,14 @@
-
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { MessageSquare, ArrowLeft, Search, Upload, Calendar, Clock, Users, Play, MoreVertical, Filter } from "lucide-react";
-import { Link } from "react-router-dom";
+import { MessageSquare, ArrowLeft, Search, Upload, Calendar, Clock, Users, MoreVertical, Filter, CheckCircle2, FileText } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
 import { useState } from "react";
 
 const MeetingManagement = () => {
   const [searchTerm, setSearchTerm] = useState("");
+  const navigate = useNavigate();
   
   const meetings = [
     {
@@ -85,6 +85,10 @@ const MeetingManagement = () => {
 
   const getStatusCount = (status: string) => {
     return meetings.filter(m => m.status === status).length;
+  };
+  
+  const handleNavigateToMeeting = (meetingId: number) => {
+    navigate(`/meeting-details?id=${meetingId}`);
   };
 
   return (
@@ -182,58 +186,70 @@ const MeetingManagement = () => {
           <CardContent>
             <div className="space-y-4">
               {filteredMeetings.map((meeting) => (
-                <div key={meeting.id} className="p-4 border rounded-lg hover:shadow-md transition-shadow">
-                  <div className="flex items-start justify-between mb-3">
-                    <div className="flex-1">
-                      <div className="flex items-center space-x-3 mb-2">
-                        <h3 className="font-medium text-gray-900">{meeting.title}</h3>
-                        {getStatusBadge(meeting.status)}
-                      </div>
-                      <div className="flex items-center space-x-6 text-sm text-gray-600 mb-2">
-                        <span className="flex items-center">
-                          <Calendar className="w-4 h-4 mr-1" />
-                          {meeting.date}
-                        </span>
-                        <span className="flex items-center">
-                          <Clock className="w-4 h-4 mr-1" />
-                          {meeting.duration}
-                        </span>
-                        <span className="flex items-center">
-                          <Users className="w-4 h-4 mr-1" />
-                          {meeting.participants} participants
-                        </span>
-                      </div>
-                      <p className="text-sm text-gray-700 mb-2">{meeting.summary}</p>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center space-x-4 text-xs text-gray-500">
-                          <span>Uploaded by {meeting.uploadedBy}</span>
-                          <span>{meeting.actionItems} action items</span>
+                <Link key={meeting.id} to={`/meeting-details?id=${meeting.id}`} className="block">
+                  <div className="p-4 border rounded-lg hover:shadow-md hover:border-blue-200 transition-all cursor-pointer group">
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex-1">
+                        <div className="flex items-center space-x-3 mb-2">
+                          <h3 className="font-medium text-gray-900 group-hover:text-blue-600 transition-colors">{meeting.title}</h3>
+                          {getStatusBadge(meeting.status)}
+                        </div>
+                        <div className="flex items-center space-x-6 text-sm text-gray-600 mb-2">
+                          <span className="flex items-center">
+                            <Calendar className="w-4 h-4 mr-1" />
+                            {meeting.date}
+                          </span>
+                          <span className="flex items-center">
+                            <Clock className="w-4 h-4 mr-1" />
+                            {meeting.duration}
+                          </span>
+                          <span className="flex items-center">
+                            <Users className="w-4 h-4 mr-1" />
+                            {meeting.participants} participants
+                          </span>
                         </div>
                       </div>
-                    </div>
-                    <Button variant="ghost" size="sm">
-                      <MoreVertical className="w-4 h-4" />
-                    </Button>
-                  </div>
-                  <div className="flex space-x-2">
-                    <Link to="/meeting-details">
-                      <Button size="sm" variant="outline">
-                        <Play className="w-4 h-4 mr-1" />
-                        View Details
+                      <Button variant="ghost" size="sm" onClick={(e) => e.stopPropagation()}>
+                        <MoreVertical className="w-4 h-4" />
                       </Button>
-                    </Link>
-                    {meeting.status === 'processed' && (
-                      <>
-                        <Button size="sm" variant="outline">Transcript</Button>
-                        <Button size="sm" variant="outline">Action Items</Button>
-                        <Button size="sm" variant="outline">Summary</Button>
-                      </>
-                    )}
-                    {meeting.status === 'failed' && (
-                      <Button size="sm" variant="outline">Retry Processing</Button>
-                    )}
+                    </div>
+                    
+                    {/* Summary */}
+                    <p className="text-sm text-gray-600 mb-3 line-clamp-2">{meeting.summary}</p>
+                    
+                    {/* Meeting insights footer */}
+                    <div className="flex items-center justify-between text-xs text-gray-500">
+                      <div className="flex items-center space-x-4">
+                        {/* Action Items Count */}
+                        {meeting.actionItems > 0 && (
+                          <span className="flex items-center">
+                            <CheckCircle2 className="w-3 h-3 mr-1 text-green-500" />
+                            {meeting.actionItems} action items
+                          </span>
+                        )}
+                        
+                        {/* Status-specific indicators */}
+                        {meeting.status === 'processed' && (
+                          <span className="flex items-center">
+                            <FileText className="w-3 h-3 mr-1 text-purple-500" />
+                            Transcript available
+                          </span>
+                        )}
+                        
+                        {meeting.status === 'processing' && (
+                          <span className="flex items-center">
+                            <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse mr-1"></div>
+                            Processing...
+                          </span>
+                        )}
+                      </div>
+                      
+                      <span className="text-gray-400">
+                        by {meeting.uploadedBy}
+                      </span>
+                    </div>
                   </div>
-                </div>
+                </Link>
               ))}
             </div>
           </CardContent>

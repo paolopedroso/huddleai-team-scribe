@@ -1,10 +1,30 @@
-
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ArrowRight, Users, FileText, MessageSquare, Clock } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { useEffect } from "react";
+import { useAuth } from "@/hooks/useAuth";
 
 const Index = () => {
+  const { currentUser, isLoading } = useAuth();
+  const navigate = useNavigate();
+
+  // Redirect to dashboard if already logged in
+  useEffect(() => {
+    if (currentUser && !isLoading) {
+      navigate("/team");
+    }
+  }, [currentUser, isLoading, navigate]);
+
+  // Navigation handler for auth/dashboard buttons
+  const handleGetStarted = () => {
+    if (currentUser) {
+      navigate("/team");
+    } else {
+      navigate("/signup");
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
       {/* Navigation */}
@@ -16,10 +36,18 @@ const Index = () => {
           <span className="text-xl font-bold text-gray-900">HuddleAI</span>
         </div>
         <div className="flex items-center space-x-4">
-          <Link to="/team">
-            <Button variant="outline">Dashboard</Button>
-          </Link>
-          <Button>Get Started</Button>
+          {currentUser ? (
+            <Link to="/team">
+              <Button variant="outline">Dashboard</Button>
+            </Link>
+          ) : (
+            <Link to="/login">
+              <Button variant="outline">Log In</Button>
+            </Link>
+          )}
+          <Button onClick={handleGetStarted}>
+            {currentUser ? "Go to Dashboard" : "Get Started"}
+          </Button>
         </div>
       </nav>
 
@@ -37,12 +65,14 @@ const Index = () => {
             and seamless integrations with your favorite tools like Jira and Slack.
           </p>
           <div className="flex justify-center space-x-4">
-            <Link to="/team">
-              <Button size="lg" className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700">
-                Start Your Free Trial
-                <ArrowRight className="ml-2 w-4 h-4" />
-              </Button>
-            </Link>
+            <Button 
+              size="lg" 
+              className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700"
+              onClick={handleGetStarted}
+            >
+              {currentUser ? "Go to Dashboard" : "Start Your Free Trial"}
+              <ArrowRight className="ml-2 w-4 h-4" />
+            </Button>
             <Button size="lg" variant="outline">
               Watch Demo
             </Button>
@@ -123,12 +153,14 @@ const Index = () => {
           <p className="text-xl mb-8 opacity-90">
             Join thousands of teams already using HuddleAI to make their meetings more productive.
           </p>
-          <Link to="/team">
-            <Button size="lg" variant="secondary">
-              Get Started Today
-              <ArrowRight className="ml-2 w-4 h-4" />
-            </Button>
-          </Link>
+          <Button 
+            size="lg" 
+            variant="secondary"
+            onClick={handleGetStarted}
+          >
+            {currentUser ? "Go to Dashboard" : "Get Started Today"}
+            <ArrowRight className="ml-2 w-4 h-4" />
+          </Button>
         </div>
       </section>
 

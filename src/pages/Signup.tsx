@@ -1,11 +1,12 @@
-
+import { useState } from "react";
+import { useNavigate, Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MessageSquare } from "lucide-react";
-import { Link } from "react-router-dom";
-import { useState } from "react";
+import { useToast } from "@/components/ui/use-toast";
+import { useAuth } from "@/hooks/useAuth";
 
 const Signup = () => {
   const [formData, setFormData] = useState({
@@ -15,12 +16,59 @@ const Signup = () => {
     password: "",
     confirmPassword: ""
   });
+  const [isLoading, setIsLoading] = useState(false);
+  const { toast } = useToast();
+  const navigate = useNavigate();
+  const { signUp, updateUserProfile } = useAuth();
 
-  const handleSignup = (e: React.FormEvent) => {
+  const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log("Signup attempt:", formData);
-    // Mock signup - redirect to team page
-    window.location.href = "/team";
+    
+    if (formData.password !== formData.confirmPassword) {
+      toast({
+        variant: "destructive",
+        title: "Passwords do not match",
+        description: "Please make sure your passwords match."
+      });
+      return;
+    }
+    
+    setIsLoading(true);
+
+    try {
+      // Create user account
+      const userCredential = await signUp(formData.email, formData.password);
+      
+      // Update profile with name
+      await updateUserProfile(`${formData.firstName} ${formData.lastName}`);
+      
+      toast({
+        title: "Account created successfully",
+        description: "You've been signed up successfully."
+      });
+      
+      // Redirect to team setup page for new users
+      navigate("/team-setup");
+    } catch (error: any) {
+      console.error("Signup error:", error);
+      
+      let errorMessage = "An error occurred during signup.";
+      if (error.code === "auth/email-already-in-use") {
+        errorMessage = "This email is already in use.";
+      } else if (error.code === "auth/weak-password") {
+        errorMessage = "Please choose a stronger password.";
+      } else if (error.code === "auth/invalid-email") {
+        errorMessage = "Please provide a valid email address.";
+      }
+      
+      toast({
+        variant: "destructive",
+        title: "Signup failed",
+        description: errorMessage
+      });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleInputChange = (field: string, value: string) => {
@@ -54,6 +102,7 @@ const Signup = () => {
                     value={formData.firstName}
                     onChange={(e) => handleInputChange("firstName", e.target.value)}
                     required
+                    disabled={isLoading}
                   />
                 </div>
                 <div className="space-y-2">
@@ -64,6 +113,7 @@ const Signup = () => {
                     value={formData.lastName}
                     onChange={(e) => handleInputChange("lastName", e.target.value)}
                     required
+                    disabled={isLoading}
                   />
                 </div>
               </div>
@@ -76,6 +126,7 @@ const Signup = () => {
                   value={formData.email}
                   onChange={(e) => handleInputChange("email", e.target.value)}
                   required
+                  disabled={isLoading}
                 />
               </div>
               <div className="space-y-2">
@@ -87,6 +138,7 @@ const Signup = () => {
                   value={formData.password}
                   onChange={(e) => handleInputChange("password", e.target.value)}
                   required
+                  disabled={isLoading}
                 />
               </div>
               <div className="space-y-2">
@@ -98,10 +150,15 @@ const Signup = () => {
                   value={formData.confirmPassword}
                   onChange={(e) => handleInputChange("confirmPassword", e.target.value)}
                   required
+                  disabled={isLoading}
                 />
               </div>
-              <Button type="submit" className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700">
-                Create Account
+              <Button 
+                type="submit" 
+                className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700"
+                disabled={isLoading}
+              >
+                {isLoading ? "Creating Account..." : "Create Account"}
               </Button>
             </form>
             

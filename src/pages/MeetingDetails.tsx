@@ -1,43 +1,576 @@
-
+import { useEffect, useState, useRef, FormEvent } from "react";
+import { useSearchParams, useNavigate, Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Play, Pause, Download, Share, MessageSquare, ArrowLeft, Calendar, Clock, Users, CheckCircle } from "lucide-react";
-import { Link } from "react-router-dom";
-import { useState } from "react";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Separator } from "@/components/ui/separator";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { 
+  MessageSquare, 
+  ArrowLeft, 
+  Calendar, 
+  Clock, 
+  Users, 
+  CheckCircle2, 
+  AlertCircle,
+  FileText,
+  Video,
+  Trash,
+  Edit,
+  Save,
+  X,
+  Loader2,
+  RefreshCw,
+  Slack
+} from "lucide-react";
+import { useToast } from "@/components/ui/use-toast";
+import { useAuth } from "@/hooks/useAuth";
+import { format } from "date-fns";
+import { doc, getDoc } from "firebase/firestore";
+import { db } from "@/lib/firebase";
+import { Meeting, getUserById, UserProfile, Comment } from "@/lib/db";
+import { deleteMeeting, updateMeeting, addCommentToMeeting, deleteComment, pollMeetingStatus, reprocessMeeting } from "@/lib/meetings";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { CalendarIcon } from "@radix-ui/react-icons";
+import { Calendar as CalendarComponent } from "@/components/ui/calendar";
+import { cn } from "@/lib/utils";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import { SlackNotification } from "@/components/SlackNotification";
 
 const MeetingDetails = () => {
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const { currentUser } = useAuth();
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const commentInputRef = useRef<HTMLTextAreaElement>(null);
+  
+  const [loading, setLoading] = useState(true);
+  const [meeting, setMeeting] = useState<Meeting | null>(null);
+  const [participants, setParticipants] = useState<UserProfile[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [allTeamMembers, setAllTeamMembers] = useState<UserProfile[]>([]);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [newComment, setNewComment] = useState("");
+  const [isAddingComment, setIsAddingComment] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isReprocessing, setIsReprocessing] = useState(false);
+  const [isPolling, setIsPolling] = useState(false);
+  const [pollingError, setPollingError] = useState<string | null>(null);
+  const pollingRef = useRef<boolean>(false);
+  
+  // Edit form state
+  const [editForm, setEditForm] = useState({
+    title: "",
+    description: "",
+    date: new Date(),
+    participants: [] as string[]
+  });
 
-  const meetingData = {
-    title: "Daily Standup - Sprint 23",
-    date: "2024-01-15",
-    duration: "12 mins",
-    participants: ["Sarah Johnson", "Mike Chen", "Emily Davis", "Alex Rodriguez"],
-    status: "processed"
+  // Team and Slack integration state
+  const [teamData, setTeamData] = useState<any>(null);
+  const [slackIntegration, setSlackIntegration] = useState<any>(null);
+
+  const meetingId = searchParams.get("id");
+  
+  const startStatusPolling = async (id: string) => {
+    if (pollingRef.current) return; // Already polling
+    
+    try {
+      pollingRef.current = true;
+      setIsPolling(true);
+      setPollingError(null);
+      
+      console.log("Starting status polling for meeting:", id);
+      
+      const finalStatus = await pollMeetingStatus(
+        id,
+        async (status) => {
+          console.log("Status update received:", status);
+          
+          // Refresh meeting data when status changes
+          try {
+            const meetingRef = doc(db, "meetings", id);
+            const meetingDoc = await getDoc(meetingRef);
+            
+            if (meetingDoc.exists()) {
+              const updatedMeetingData = { id: meetingDoc.id, ...meetingDoc.data() } as Meeting;
+              setMeeting(updatedMeetingData);
+              
+              // Update comments if they exist
+              if (updatedMeetingData.comments) {
+                const sortedComments = [...updatedMeetingData.comments].sort((a, b) => {
+                  const dateA = a.timestamp?.toDate?.() || new Date(0);
+                  const dateB = b.timestamp?.toDate?.() || new Date(0);
+                  return dateB.getTime() - dateA.getTime();
+                });
+                setComments(sortedComments);
+              }
+            }
+          } catch (error) {
+            console.error("Error refreshing meeting data during polling:", error);
+          }
+        }
+      );
+      
+      console.log("Polling completed with final status:", finalStatus);
+      
+      if (finalStatus === 'processed') {
+        toast({
+          title: "Processing Complete!",
+          description: "Your meeting has been successfully processed with AI insights."
+        });
+      } else if (finalStatus === 'failed') {
+        toast({
+          variant: "destructive",
+          title: "Processing Failed",
+          description: "There was an issue processing your meeting. You can try reprocessing it."
+        });
+      }
+      
+    } catch (error) {
+      console.error("Polling error:", error);
+      setPollingError(error instanceof Error ? error.message : "Failed to monitor processing status");
+      toast({
+        variant: "destructive",
+        title: "Status Monitoring Error",
+        description: "Unable to monitor processing status. Please refresh the page to check current status."
+      });
+    } finally {
+      pollingRef.current = false;
+      setIsPolling(false);
+    }
+  };
+  
+  useEffect(() => {
+    if (!currentUser) {
+      navigate("/login");
+      return;
+    }
+    
+    if (!meetingId) {
+      setError("Meeting ID is missing");
+      setLoading(false);
+      return;
+    }
+    
+    const fetchMeeting = async () => {
+      try {
+        setLoading(true);
+        
+        // Get meeting data
+        const meetingRef = doc(db, "meetings", meetingId);
+        const meetingDoc = await getDoc(meetingRef);
+        
+        if (!meetingDoc.exists()) {
+          setError("Meeting not found");
+          setLoading(false);
+          return;
+        }
+        
+        const meetingData = { id: meetingDoc.id, ...meetingDoc.data() } as Meeting;
+        setMeeting(meetingData);
+        
+        // Load comments if they exist
+        if (meetingData.comments) {
+          // Sort comments by timestamp (newest first)
+          const sortedComments = [...meetingData.comments].sort((a, b) => {
+            const dateA = a.timestamp?.toDate?.() || new Date(0);
+            const dateB = b.timestamp?.toDate?.() || new Date(0);
+            return dateB.getTime() - dateA.getTime();
+          });
+          setComments(sortedComments);
+        }
+        
+        // Set edit form initial values
+        setEditForm({
+          title: meetingData.title,
+          description: meetingData.description || "",
+          date: meetingData.date.toDate(),
+          participants: meetingData.participants || []
+        });
+        
+        // Fetch participant info
+        if (meetingData.participants && meetingData.participants.length > 0) {
+          const participantProfiles = await Promise.all(
+            meetingData.participants.map(async (id) => {
+              try {
+                const profile = await getUserById(id);
+                return profile;
+              } catch (err) {
+                console.error(`Error fetching participant ${id}:`, err);
+                return null;
+              }
+            })
+          );
+          
+          // Filter out nulls
+          const validProfiles = participantProfiles.filter(p => p !== null) as UserProfile[];
+          setParticipants(validProfiles);
+          
+          // Set team members for edit dialog - using the same profiles
+          setAllTeamMembers(validProfiles);
+        }
+        
+        // Fetch team data and Slack integration
+        if (meetingData.teamId) {
+          try {
+            const teamRef = doc(db, "teams", meetingData.teamId);
+            const teamDoc = await getDoc(teamRef);
+            
+            if (teamDoc.exists()) {
+              const teamInfo = teamDoc.data();
+              setTeamData(teamInfo);
+              setSlackIntegration(teamInfo.slackIntegration || null);
+            }
+          } catch (teamError) {
+            console.error("Error fetching team data:", teamError);
+            // Don't fail the whole page if team data fails
+          }
+        }
+        
+        // Start polling if meeting is still processing
+        if ((meetingData.status === 'uploaded' || meetingData.status === 'processing') && !pollingRef.current) {
+          startStatusPolling(meetingData.id);
+        }
+        
+      } catch (err) {
+        console.error("Error fetching meeting:", err);
+        setError("Failed to load meeting details");
+        toast({
+          variant: "destructive",
+          title: "Error",
+          description: "There was a problem loading the meeting details."
+        });
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    fetchMeeting();
+    
+    // Cleanup function to stop polling when component unmounts
+    return () => {
+      pollingRef.current = false;
+    };
+  }, [currentUser, meetingId, navigate, toast]);
+
+  const formatDuration = (durationInSeconds?: number) => {
+    if (!durationInSeconds) return "0 mins";
+    
+    const minutes = Math.floor(durationInSeconds / 60);
+    const hours = Math.floor(minutes / 60);
+    
+    if (hours > 0) {
+      const remainingMinutes = minutes % 60;
+      return `${hours}h ${remainingMinutes > 0 ? remainingMinutes + 'm' : ''}`;
+    } else {
+      return `${minutes} mins`;
+    }
+  };
+  
+  const formatDate = (timestamp?: any) => {
+    if (!timestamp) return "";
+    
+    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+    return format(date, "PPP");
+  };
+  
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case "processed":
+        return <Badge className="bg-green-100 text-green-800">✓ Processed</Badge>;
+      case "processing":
+        return (
+          <div className="flex items-center gap-2">
+            <Badge className="bg-blue-100 text-blue-800">
+              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+              Processing
+            </Badge>
+            {isPolling && (
+              <span className="text-xs text-gray-500">Live updates enabled</span>
+            )}
+          </div>
+        );
+      case "failed":
+        return <Badge variant="destructive">✗ Failed</Badge>;
+      case "uploaded":
+        return (
+          <div className="flex items-center gap-2">
+            <Badge className="bg-yellow-100 text-yellow-800">
+              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+              Uploaded - Starting Processing
+            </Badge>
+            {isPolling && (
+              <span className="text-xs text-gray-500">Live updates enabled</span>
+            )}
+          </div>
+        );
+      default:
+        return <Badge variant="secondary">Unknown</Badge>;
+    }
   };
 
-  const actionItems = [
-    { id: 1, task: "Fix authentication bug", assignee: "Mike Chen", deadline: "2024-01-17", completed: false },
-    { id: 2, task: "Review design mockups", assignee: "Emily Davis", deadline: "2024-01-16", completed: true },
-    { id: 3, task: "Deploy to staging", assignee: "Alex Rodriguez", deadline: "2024-01-18", completed: false }
-  ];
+  const handleDeleteMeeting = async () => {
+    if (!meetingId) return;
+    
+    try {
+      setIsDeleting(true);
+      
+      await deleteMeeting(meetingId);
+      
+      toast({
+        title: "Meeting deleted",
+        description: "The meeting and all its associated data have been permanently deleted."
+      });
+      
+      // Give the toast a moment to be seen before redirecting
+      setTimeout(() => {
+        // Navigate back to meetings list
+        navigate("/team");
+      }, 1500);
+    } catch (error) {
+      console.error("Error deleting meeting:", error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error instanceof Error ? error.message : "There was a problem deleting the meeting."
+      });
+    } finally {
+      setIsDeleting(false);
+      setShowDeleteDialog(false);
+    }
+  };
+  
+  const handleEditSave = async () => {
+    if (!meetingId) return;
+    
+    try {
+      await updateMeeting(meetingId, {
+        title: editForm.title,
+        description: editForm.description,
+        date: editForm.date,
+        participants: editForm.participants
+      });
+      
+      toast({
+        title: "Meeting updated",
+        description: "Meeting details have been updated successfully."
+      });
+      
+      // Refresh meeting data
+      const meetingRef = doc(db, "meetings", meetingId);
+      const meetingDoc = await getDoc(meetingRef);
+      
+      if (meetingDoc.exists()) {
+        const meetingData = { id: meetingDoc.id, ...meetingDoc.data() } as Meeting;
+        setMeeting(meetingData);
+      }
+      
+      setShowEditDialog(false);
+    } catch (error) {
+      console.error("Error updating meeting:", error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "There was a problem updating the meeting."
+      });
+    }
+  };
+  
+  const toggleParticipant = (participantId: string) => {
+    setEditForm(prev => {
+      if (prev.participants.includes(participantId)) {
+        return {
+          ...prev,
+          participants: prev.participants.filter(id => id !== participantId)
+        };
+      } else {
+        return {
+          ...prev,
+          participants: [...prev.participants, participantId]
+        };
+      }
+    });
+  };
 
-  const transcript = `Sarah Johnson: Good morning everyone, let's start with our daily standup. Mike, would you like to go first?
+  const handleAddComment = async (e: FormEvent) => {
+    e.preventDefault();
+    
+    if (!newComment.trim() || !meetingId || !currentUser) {
+      return;
+    }
+    
+    try {
+      setIsAddingComment(true);
+      
+      await addCommentToMeeting(meetingId, newComment.trim());
+      
+      // Clear the input
+      setNewComment("");
+      
+      // Refresh meeting data to get the new comment
+      const meetingRef = doc(db, "meetings", meetingId);
+      const meetingDoc = await getDoc(meetingRef);
+      
+      if (meetingDoc.exists()) {
+        const meetingData = { id: meetingDoc.id, ...meetingDoc.data() } as Meeting;
+        
+        if (meetingData.comments) {
+          // Sort comments by timestamp (newest first)
+          const sortedComments = [...meetingData.comments].sort((a, b) => {
+            const dateA = a.timestamp?.toDate?.() || new Date(0);
+            const dateB = b.timestamp?.toDate?.() || new Date(0);
+            return dateB.getTime() - dateA.getTime();
+          });
+          setComments(sortedComments);
+        }
+      }
+      
+      toast({
+        title: "Comment added",
+        description: "Your comment has been added to the meeting."
+      });
+    } catch (error) {
+      console.error("Error adding comment:", error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "There was a problem adding your comment."
+      });
+    } finally {
+      setIsAddingComment(false);
+    }
+  };
+  
+  const handleDeleteComment = async (commentId: string) => {
+    if (!meetingId) return;
+    
+    try {
+      await deleteComment(meetingId, commentId);
+      
+      // Update local state
+      setComments(comments.filter(comment => comment.id !== commentId));
+      
+      toast({
+        title: "Comment deleted",
+        description: "Your comment has been deleted."
+      });
+    } catch (error) {
+      console.error("Error deleting comment:", error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "There was a problem deleting your comment."
+      });
+    }
+  };
+  
+  const formatCommentDate = (timestamp: any) => {
+    if (!timestamp) return "";
+    
+    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+    return format(date, "MMM d, yyyy 'at' h:mm a");
+  };
 
-Mike Chen: Sure! Yesterday I worked on the authentication bug we found in testing. I made good progress and should have it fixed by end of day today. No blockers for me.
+  const handleReprocess = async () => {
+    if (!meetingId) return;
+    
+    try {
+      setIsReprocessing(true);
+      
+      await reprocessMeeting(meetingId);
+      
+      toast({
+        title: "Reprocessing started",
+        description: "Your meeting is being reprocessed. This may take a few minutes."
+      });
+      
+      // Start polling for status updates
+      if (!pollingRef.current) {
+        startStatusPolling(meetingId);
+      }
+    } catch (error) {
+      console.error("Error reprocessing meeting:", error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error instanceof Error ? error.message : "There was a problem reprocessing the meeting."
+      });
+    } finally {
+      setIsReprocessing(false);
+    }
+  };
 
-Emily Davis: Thanks Mike. I finished the design review for the new user onboarding flow. All mockups are ready for development. Planning to start on the next feature today.
+  const handleSlackNotificationSent = async () => {
+    // Refresh meeting data to get updated Slack notification status
+    if (!meetingId) return;
+    
+    try {
+      const meetingRef = doc(db, "meetings", meetingId);
+      const meetingDoc = await getDoc(meetingRef);
+      
+      if (meetingDoc.exists()) {
+        const updatedMeetingData = { id: meetingDoc.id, ...meetingDoc.data() } as Meeting;
+        setMeeting(updatedMeetingData);
+      }
+    } catch (error) {
+      console.error("Error refreshing meeting data:", error);
+    }
+  };
 
-Alex Rodriguez: Great work team. I completed the CI/CD pipeline improvements yesterday. Today I'll be working on the staging deployment. Should be ready for testing by tomorrow.
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-screen">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
 
-Sarah Johnson: Excellent progress everyone. Any blockers or questions before we wrap up?`;
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen p-4">
+        <Alert variant="destructive" className="max-w-md mb-4">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+        <Button variant="outline" onClick={() => navigate("/team")}>
+          <ArrowLeft className="w-4 h-4 mr-2" />
+          Back to Dashboard
+        </Button>
+      </div>
+    );
+  }
+
+  if (!meeting) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen p-4">
+        <Alert variant="destructive" className="max-w-md mb-4">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>Meeting not found</AlertDescription>
+        </Alert>
+        <Button variant="outline" onClick={() => navigate("/team")}>
+          <ArrowLeft className="w-4 h-4 mr-2" />
+          Back to Dashboard
+        </Button>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
       {/* Navigation */}
-      <nav className="px-6 py-4 flex justify-between items-center border-b bg-white/80 backdrop-blur-sm">
+      <nav className="px-4 py-3 flex justify-between items-center border-b bg-white/80 backdrop-blur-sm">
         <div className="flex items-center space-x-2">
           <Link to="/team" className="flex items-center space-x-2">
             <div className="w-8 h-8 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg flex items-center justify-center">
@@ -46,185 +579,702 @@ Sarah Johnson: Excellent progress everyone. Any blockers or questions before we 
             <span className="text-xl font-bold text-gray-900">HuddleAI</span>
           </Link>
         </div>
-        <div className="flex items-center space-x-4">
-          <Button variant="outline">
-            <Share className="w-4 h-4 mr-2" />
-            Share
-          </Button>
-          <Button variant="outline">
-            <Download className="w-4 h-4 mr-2" />
-            Export
-          </Button>
+        <div className="flex space-x-2">
+          <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+            <DialogTrigger asChild>
+              <Button variant="outline" className="text-red-600 border-red-200 hover:bg-red-50">
+                <Trash className="w-4 h-4 mr-2" />
+                Delete
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Delete Meeting</DialogTitle>
+                <DialogDescription>
+                  Are you sure you want to delete this meeting? This will permanently remove:
+                </DialogDescription>
+              </DialogHeader>
+              
+              <div className="py-3">
+                <ul className="list-disc pl-5 space-y-1 text-sm">
+                  <li>The meeting recording from storage</li>
+                  <li>The meeting transcript (if available)</li>
+                  <li>All meeting details and metadata</li>
+                  <li>All comments and action items</li>
+                </ul>
+                <p className="mt-3 text-sm text-red-600 font-medium">This action cannot be undone.</p>
+              </div>
+              
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setShowDeleteDialog(false)}>
+                  Cancel
+                </Button>
+                <Button 
+                  variant="destructive" 
+                  onClick={handleDeleteMeeting}
+                  disabled={isDeleting}
+                >
+                  {isDeleting ? "Deleting..." : "Yes, Delete Everything"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+          
+          <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
+            <DialogTrigger asChild>
+              <Button variant="outline">
+                <Edit className="w-4 h-4 mr-2" />
+                Edit
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-[425px]">
+              <DialogHeader>
+                <DialogTitle>Edit Meeting Details</DialogTitle>
+                <DialogDescription>
+                  Make changes to the meeting information here.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-4 py-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="title">Title</Label>
+                  <Input
+                    id="title"
+                    value={editForm.title}
+                    onChange={(e) => setEditForm({ ...editForm, title: e.target.value })}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="description">Description</Label>
+                  <Textarea
+                    id="description"
+                    value={editForm.description}
+                    onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Meeting Date</Label>
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button
+                        variant={"outline"}
+                        className={cn(
+                          "w-full justify-start text-left font-normal",
+                          !editForm.date && "text-muted-foreground"
+                        )}
+                      >
+                        <CalendarIcon className="mr-2 h-4 w-4" />
+                        {editForm.date ? format(editForm.date, "PPP") : <span>Pick a date</span>}
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-auto p-0">
+                      <CalendarComponent
+                        mode="single"
+                        selected={editForm.date}
+                        onSelect={(date) => date && setEditForm({ ...editForm, date })}
+                        initialFocus
+                      />
+                    </PopoverContent>
+                  </Popover>
+                </div>
+                <div className="grid gap-2">
+                  <Label>Participants</Label>
+                  <div className="border rounded-md p-4 max-h-[200px] overflow-y-auto">
+                    {allTeamMembers.map((member) => (
+                      <div key={member.uid} className="flex items-center space-x-2 mb-2">
+                        <Checkbox
+                          id={`member-${member.uid}`}
+                          checked={editForm.participants.includes(member.uid)}
+                          onCheckedChange={() => toggleParticipant(member.uid)}
+                        />
+                        <Label htmlFor={`member-${member.uid}`}>{member.displayName}</Label>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button type="submit" onClick={handleEditSave}>
+                  Save changes
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+          
           <Link to="/team">
             <Button variant="outline">
               <ArrowLeft className="w-4 h-4 mr-2" />
-              Back
+              Back to Dashboard
             </Button>
           </Link>
         </div>
       </nav>
 
-      <div className="px-6 py-8 max-w-6xl mx-auto">
-        {/* Meeting Header */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-4">
-            <h1 className="text-3xl font-bold text-gray-900">{meetingData.title}</h1>
-            <Badge className="bg-green-100 text-green-800">Processed</Badge>
-          </div>
-          <div className="flex items-center space-x-6 text-gray-600">
-            <span className="flex items-center">
-              <Calendar className="w-4 h-4 mr-1" />
-              {meetingData.date}
-            </span>
-            <span className="flex items-center">
-              <Clock className="w-4 h-4 mr-1" />
-              {meetingData.duration}
-            </span>
-            <span className="flex items-center">
-              <Users className="w-4 h-4 mr-1" />
-              {meetingData.participants.length} participants
-            </span>
+      <div className="container mx-auto px-4 py-6 max-w-7xl">
+        {/* Top Section - Meeting Header with Key Info */}
+        <div className="bg-white rounded-lg shadow-md p-4 mb-6">
+          <div className="flex flex-col md:flex-row justify-between">
+            {/* Left side - Title and basic info */}
+            <div className="flex-1">
+              <h1 className="text-2xl font-bold text-gray-900">{meeting.title}</h1>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2">
+                <div className="flex items-center">
+                  <Calendar className="w-4 h-4 text-gray-400 mr-1" />
+                  <span className="text-gray-600 text-sm">{formatDate(meeting.date)}</span>
+                </div>
+                
+                <div className="flex items-center">
+                  <Clock className="w-4 h-4 text-gray-400 mr-1" />
+                  <span className="text-gray-600 text-sm">{formatDuration(meeting.duration)}</span>
+                </div>
+                
+                <div className="flex items-center gap-2">
+                  {getStatusBadge(meeting.status)}
+                  {meeting.status === 'failed' && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleReprocess}
+                      disabled={isReprocessing}
+                      className="text-xs h-6"
+                    >
+                      {isReprocessing ? (
+                        <>
+                          <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                          Reprocessing...
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="w-3 h-3 mr-1" />
+                          Reprocess
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </div>
+                
+                <div className="flex items-center">
+                  <span className="text-gray-600 text-sm">Uploaded by: {meeting.uploadedByName}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Right side - Participants */}
+            <div className="mt-4 md:mt-0 md:ml-4">
+              <p className="text-sm font-medium text-gray-500 mb-1">Participants ({participants.length})</p>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {participants.length > 0 ? (
+                  participants.map((participant) => (
+                    <Avatar key={participant.uid} className="h-8 w-8 border-2 border-white" title={participant.displayName}>
+                      <AvatarImage src={participant.photoURL || ''} />
+                      <AvatarFallback>
+                        {participant.displayName 
+                          ? participant.displayName.split(' ').map(n => n[0]).join('').toUpperCase() 
+                          : participant.email?.substring(0, 2).toUpperCase() || 'U'}
+                      </AvatarFallback>
+                    </Avatar>
+                  ))
+                ) : (
+                  <p className="text-xs text-gray-500">No participants recorded</p>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* Media Player */}
-        <Card className="mb-8 border-0 shadow-lg">
-          <CardContent className="p-6">
-            <div className="bg-gray-900 rounded-lg aspect-video flex items-center justify-center mb-4">
-              <Button
-                size="lg"
-                className="bg-white/20 hover:bg-white/30 text-white"
-                onClick={() => setIsPlaying(!isPlaying)}
-              >
-                {isPlaying ? <Pause className="w-6 h-6" /> : <Play className="w-6 h-6" />}
-              </Button>
-            </div>
-            <div className="flex items-center space-x-4">
-              <Button variant="outline" onClick={() => setIsPlaying(!isPlaying)}>
-                {isPlaying ? <Pause className="w-4 h-4 mr-2" /> : <Play className="w-4 h-4 mr-2" />}
-                {isPlaying ? "Pause" : "Play"}
-              </Button>
-              <div className="flex-1 bg-gray-200 rounded-full h-2">
-                <div className="bg-blue-600 h-2 rounded-full w-1/3"></div>
+        {/* Main Content Section */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+          {/* Video Player - Left Column */}
+          <div className="lg:col-span-2">
+            {meeting.recordingUrl ? (
+              <Card className="border-0 shadow-md overflow-hidden h-full">
+                <CardContent className="p-0">
+                  <video 
+                    ref={videoRef}
+                    src={meeting.recordingUrl} 
+                    controls 
+                    className="w-full h-auto rounded-t-md"
+                    poster="/video-thumbnail.jpg"
+                  />
+                </CardContent>
+                <CardFooter className="bg-gray-50 px-4 py-2">
+                  <div className="flex items-center space-x-2 text-sm text-gray-700">
+                    <Video className="w-4 h-4 text-blue-500" />
+                    <span>Meeting Recording</span>
+                  </div>
+                </CardFooter>
+              </Card>
+            ) : (
+              <Card className="border-0 shadow-md flex items-center justify-center h-full">
+                <CardContent className="text-center p-6">
+                  <div className="rounded-full bg-gray-100 p-4 mx-auto mb-4 w-16 h-16 flex items-center justify-center">
+                    <Video className="w-8 h-8 text-gray-400" />
+                  </div>
+                  <h3 className="text-lg font-medium text-gray-700 mb-1">No Recording Available</h3>
+                  <p className="text-sm text-gray-500">This meeting doesn't have a video recording</p>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+
+          {/* AI Summary - Right Column */}
+          <div>
+            <Card className="border-0 shadow-md h-full">
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center text-lg">
+                  <MessageSquare className="w-5 h-5 mr-2 text-purple-500" />
+                  AI Summary
+                </CardTitle>
+                <CardDescription>
+                  AI-generated meeting overview and insights
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {(meeting.status === 'processing' || meeting.status === 'uploaded') ? (
+                  <div className="flex items-center justify-center py-6 text-center">
+                    <div>
+                      <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mx-auto mb-4"></div>
+                      <p className="text-gray-500 text-sm">
+                        {meeting.status === 'uploaded' 
+                          ? 'Starting AI processing...' 
+                          : 'Your meeting is being processed...'}
+                      </p>
+                      <p className="text-gray-400 text-xs mt-1">This may take a few minutes</p>
+                      {isPolling && (
+                        <p className="text-blue-500 text-xs mt-2 flex items-center justify-center gap-1">
+                          <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+                          Live updates enabled
+                        </p>
+                      )}
+                      {pollingError && (
+                        <p className="text-red-500 text-xs mt-2">
+                          Status monitoring error - please refresh to check progress
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                ) : meeting.status === 'failed' ? (
+                  <div className="space-y-3">
+                    <Alert variant="destructive">
+                      <AlertCircle className="h-4 w-4" />
+                      <AlertTitle>Processing Failed</AlertTitle>
+                      <AlertDescription>There was a problem processing this meeting.</AlertDescription>
+                    </Alert>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleReprocess}
+                      disabled={isReprocessing}
+                      className="w-full"
+                    >
+                      {isReprocessing ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Reprocessing...
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="w-4 h-4 mr-2" />
+                          Try Reprocessing
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                ) : meeting.aiSummary ? (
+                  <div className="prose max-w-none">
+                    <p className="text-gray-700 text-sm leading-relaxed">{meeting.aiSummary}</p>
+                  </div>
+                ) : meeting.summary ? (
+                  <div className="prose max-w-none">
+                    <p className="text-gray-700 text-sm">{meeting.summary}</p>
+                  </div>
+                ) : (
+                  <p className="text-gray-500 text-center py-4 text-sm">No summary available</p>
+                )}
+                
+                {meeting.description && (
+                  <div className="mt-4 pt-4 border-t">
+                    <p className="text-sm font-medium text-gray-500 mb-1">Description</p>
+                    <p className="text-gray-700 text-sm">{meeting.description}</p>
+                  </div>
+                )}
+                
+                {meeting.transcript && (
+                  <div className="mt-4">
+                    <Button 
+                      variant="outline" 
+                      className="w-full text-sm h-8"
+                      onClick={() => {
+                        const transcriptSection = document.querySelector('[data-transcript-section]');
+                        transcriptSection?.scrollIntoView({ behavior: 'smooth' });
+                      }}
+                    >
+                      <FileText className="w-3 h-3 mr-2" />
+                      View Full Transcript
+                    </Button>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+        
+        {/* Action Items Section */}
+        <Card className="border-0 shadow-md mb-6">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center text-lg">
+              <CheckCircle2 className="w-5 h-5 mr-2 text-green-500" />
+              Action Items
+            </CardTitle>
+            <CardDescription>
+              Tasks and follow-ups identified from this meeting
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {(meeting.status === 'processing' || meeting.status === 'uploaded') ? (
+              <div className="flex items-center justify-center py-6 text-center">
+                <div>
+                  <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mx-auto mb-4"></div>
+                  <p className="text-gray-500 text-sm">
+                    {meeting.status === 'uploaded' 
+                      ? 'Starting AI processing...' 
+                      : 'Your meeting is being processed...'}
+                  </p>
+                  <p className="text-gray-400 text-xs mt-1">Action items will appear here once processing is complete</p>
+                  {isPolling && (
+                    <p className="text-blue-500 text-xs mt-2 flex items-center justify-center gap-1">
+                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+                      Live updates enabled
+                    </p>
+                  )}
+                </div>
               </div>
-              <span className="text-sm text-gray-600">4:32 / 12:15</span>
+            ) : meeting.aiActionItems && meeting.aiActionItems.length > 0 ? (
+              <div className="space-y-3">
+                {meeting.aiActionItems.map((item, index) => (
+                  <div key={index} className="p-4 border rounded-lg bg-gradient-to-r from-indigo-50 to-purple-50">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <p className="text-gray-800 font-medium text-sm mb-2">{item.description}</p>
+                        <div className="flex flex-wrap gap-2 text-xs">
+                          {item.assignedTo && (
+                            <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">
+                              Assigned to: {item.assignedTo}
+                            </span>
+                          )}
+                          {item.dueDate && (
+                            <span className="bg-orange-100 text-orange-800 px-2 py-1 rounded">
+                              Due: {item.dueDate}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <Badge variant="secondary" className="text-xs ml-3">
+                        {item.status}
+                      </Badge>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : meeting.actionItems && meeting.actionItems.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {meeting.actionItems.map((item, i) => (
+                  <div key={i} className="flex items-start space-x-2 p-3 border rounded-md">
+                    <CheckCircle2 className="w-4 h-4 text-green-500 mt-0.5" />
+                    <div className="flex-1">
+                      <p className="text-gray-800 font-medium text-sm">{item.description}</p>
+                      {item.assignedToName && (
+                        <p className="text-xs text-gray-500 mt-1">Assigned to: {item.assignedToName}</p>
+                      )}
+                    </div>
+                    <Badge variant={item.status === 'completed' ? 'outline' : 'secondary'} className="text-xs">
+                      {item.status === 'completed' ? 'Completed' : 
+                       item.status === 'in-progress' ? 'In Progress' : 'Pending'}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-gray-500 text-center py-4 text-sm">No action items identified</p>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Topics Discussed */}
+        {meeting.status === 'processed' && meeting.topicsDiscussed && meeting.topicsDiscussed.length > 0 && (
+          <Card className="border-0 shadow-md mb-6">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center text-lg">
+                <Users className="w-5 h-5 mr-2 text-blue-500" />
+                Topics Discussed
+              </CardTitle>
+              <CardDescription>
+                Key themes and subjects covered
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ul className="space-y-2">
+                {meeting.topicsDiscussed.map((topic, index) => (
+                  <li key={index} className="flex items-start space-x-2">
+                    <div className="w-2 h-2 bg-blue-500 rounded-full mt-2 flex-shrink-0"></div>
+                    <span className="text-gray-700 text-sm">{topic}</span>
+                  </li>
+                ))}
+              </ul>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Work Done and Decisions */}
+        {meeting.status === 'processed' && (meeting.workDone?.length || meeting.decisionsMade?.length) && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+            {/* Work Already Done */}
+            {meeting.workDone && meeting.workDone.length > 0 && (
+              <Card className="border-0 shadow-md">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center text-lg">
+                    <CheckCircle2 className="w-5 h-5 mr-2 text-green-500" />
+                    Work Completed
+                  </CardTitle>
+                  <CardDescription>
+                    Tasks and accomplishments mentioned
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ul className="space-y-2">
+                    {meeting.workDone.map((work, index) => (
+                      <li key={index} className="flex items-start space-x-2">
+                        <CheckCircle2 className="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" />
+                        <span className="text-gray-700 text-sm">{work}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Decisions Made */}
+            {meeting.decisionsMade && meeting.decisionsMade.length > 0 && (
+              <Card className="border-0 shadow-md">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center text-lg">
+                    <AlertCircle className="w-5 h-5 mr-2 text-orange-500" />
+                    Decisions Made
+                  </CardTitle>
+                  <CardDescription>
+                    Key decisions and approvals
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ul className="space-y-2">
+                    {meeting.decisionsMade.map((decision, index) => (
+                      <li key={index} className="flex items-start space-x-2">
+                        <div className="w-2 h-2 bg-orange-500 rounded-full mt-2 flex-shrink-0"></div>
+                        <span className="text-gray-700 text-sm">{decision}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        )}
+
+        {/* Follow-up Questions */}
+        {meeting.status === 'processed' && meeting.followUpQuestions?.length && (
+          <Card className="border-0 shadow-md mb-6">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center text-lg">
+                <MessageSquare className="w-5 h-5 mr-2 text-yellow-500" />
+                Follow-up Questions
+              </CardTitle>
+              <CardDescription>
+                Unresolved questions and concerns
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ul className="space-y-2">
+                {meeting.followUpQuestions.map((question, index) => (
+                  <li key={index} className="flex items-start space-x-2">
+                    <div className="w-2 h-2 bg-yellow-500 rounded-full mt-2 flex-shrink-0"></div>
+                    <span className="text-gray-700 text-sm">{question}</span>
+                  </li>
+                ))}
+              </ul>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Transcript Section */}
+        {meeting.status === 'processed' && meeting.transcript && (
+          <Card className="border-0 shadow-md mb-6" data-transcript-section>
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center text-lg">
+                <FileText className="w-5 h-5 mr-2 text-gray-500" />
+                Meeting Transcript
+              </CardTitle>
+              <CardDescription>
+                Full transcript of the meeting conversation
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="bg-gray-50 rounded-lg p-4 max-h-96 overflow-y-auto">
+                <pre className="whitespace-pre-wrap text-sm text-gray-700 font-mono leading-relaxed">
+                  {meeting.transcript}
+                </pre>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Other Observations */}
+        {meeting.status === 'processed' && meeting.otherObservations && (
+          <Card className="border-0 shadow-md mb-6">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center text-lg">
+                <FileText className="w-5 h-5 mr-2 text-gray-500" />
+                Other Observations
+              </CardTitle>
+              <CardDescription>
+                Additional insights from AI analysis
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="prose max-w-none">
+                <p className="text-gray-700 text-sm leading-relaxed">{meeting.otherObservations}</p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Comments Section */}
+        <Card className="border-0 shadow-md mb-6">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center text-lg">
+              <MessageSquare className="w-5 h-5 mr-2 text-blue-500" />
+              Comments
+            </CardTitle>
+            <CardDescription>
+              Discuss this meeting with your team
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {/* Add Comment Form */}
+            <form onSubmit={handleAddComment} className="mb-6">
+              <div className="flex gap-3">
+                <Avatar className="h-8 w-8 flex-shrink-0">
+                  <AvatarImage src={currentUser?.photoURL || ''} />
+                  <AvatarFallback>
+                    {currentUser?.displayName 
+                      ? currentUser.displayName.split(' ').map(n => n[0]).join('').toUpperCase() 
+                      : currentUser?.email?.substring(0, 2).toUpperCase() || 'U'}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="flex-1">
+                  <Textarea
+                    ref={commentInputRef}
+                    placeholder="Add a comment..."
+                    value={newComment}
+                    onChange={(e) => setNewComment(e.target.value)}
+                    className="min-h-[80px] resize-none"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        handleAddComment(e);
+                      }
+                    }}
+                  />
+                  <div className="flex justify-between items-center mt-2">
+                    <p className="text-xs text-gray-500">
+                      Press Cmd+Enter to post
+                    </p>
+                    <Button 
+                      type="submit" 
+                      size="sm"
+                      disabled={!newComment.trim() || isAddingComment}
+                    >
+                      {isAddingComment ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Posting...
+                        </>
+                      ) : (
+                        'Post Comment'
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </form>
+
+            {/* Comments List */}
+            <div className="space-y-4">
+              {comments.length > 0 ? (
+                comments.map((comment) => (
+                  <div key={comment.id} className="flex gap-3 p-4 bg-gray-50 rounded-lg">
+                    <Avatar className="h-8 w-8 flex-shrink-0">
+                      <AvatarImage src={comment.userPhotoURL || ''} />
+                      <AvatarFallback>
+                        {comment.userName 
+                          ? comment.userName.split(' ').map(n => n[0]).join('').toUpperCase() 
+                          : 'U'}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-sm">{comment.userName}</span>
+                          <span className="text-xs text-gray-500">
+                            {comment.timestamp?.toDate ? format(comment.timestamp.toDate(), 'PPp') : 'Unknown time'}
+                          </span>
+                        </div>
+                        {comment.userId === currentUser?.uid && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleDeleteComment(comment.id)}
+                            className="h-6 w-6 p-0 text-gray-400 hover:text-red-500"
+                          >
+                            <X className="w-3 h-3" />
+                          </Button>
+                        )}
+                      </div>
+                      <p className="text-sm text-gray-700 whitespace-pre-wrap">{comment.text}</p>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-center py-8">
+                  <MessageSquare className="h-12 w-12 mx-auto text-gray-300 mb-4" />
+                  <p className="text-gray-500 mb-2">No comments yet</p>
+                  <p className="text-sm text-gray-400">Be the first to share your thoughts about this meeting</p>
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>
 
-        {/* Tabs for Content */}
-        <Tabs defaultValue="summary" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-4">
-            <TabsTrigger value="summary">Summary</TabsTrigger>
-            <TabsTrigger value="transcript">Transcript</TabsTrigger>
-            <TabsTrigger value="actions">Action Items</TabsTrigger>
-            <TabsTrigger value="participants">Participants</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="summary">
-            <Card className="border-0 shadow-lg">
-              <CardHeader>
-                <CardTitle>AI-Generated Summary</CardTitle>
-                <CardDescription>Key highlights from this meeting</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <h4 className="font-semibold mb-2">Key Updates</h4>
-                  <ul className="list-disc list-inside space-y-1 text-gray-700">
-                    <li>Authentication bug fix in progress (Mike Chen)</li>
-                    <li>Design review completed for user onboarding (Emily Davis)</li>
-                    <li>CI/CD pipeline improvements completed (Alex Rodriguez)</li>
-                  </ul>
-                </div>
-                <div>
-                  <h4 className="font-semibold mb-2">Blockers</h4>
-                  <p className="text-gray-700">No blockers reported by team members.</p>
-                </div>
-                <div>
-                  <h4 className="font-semibold mb-2">Next Steps</h4>
-                  <ul className="list-disc list-inside space-y-1 text-gray-700">
-                    <li>Complete authentication bug fix by end of day</li>
-                    <li>Begin staging deployment preparation</li>
-                    <li>Start development on new feature designs</li>
-                  </ul>
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="transcript">
-            <Card className="border-0 shadow-lg">
-              <CardHeader>
-                <CardTitle>Meeting Transcript</CardTitle>
-                <CardDescription>Full conversation with speaker identification</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="whitespace-pre-line text-gray-700 leading-relaxed">
-                  {transcript}
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="actions">
-            <Card className="border-0 shadow-lg">
-              <CardHeader>
-                <CardTitle>Action Items</CardTitle>
-                <CardDescription>Tasks identified from this meeting</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-4">
-                  {actionItems.map((item) => (
-                    <div key={item.id} className="flex items-center justify-between p-4 border rounded-lg">
-                      <div className="flex items-center space-x-3">
-                        <CheckCircle className={`w-5 h-5 ${item.completed ? 'text-green-600' : 'text-gray-400'}`} />
-                        <div>
-                          <p className={`font-medium ${item.completed ? 'line-through text-gray-500' : 'text-gray-900'}`}>
-                            {item.task}
-                          </p>
-                          <p className="text-sm text-gray-600">Assigned to: {item.assignee}</p>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-sm text-gray-600">Due: {item.deadline}</p>
-                        <Badge variant={item.completed ? "default" : "secondary"}>
-                          {item.completed ? "Completed" : "Pending"}
-                        </Badge>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="participants">
-            <Card className="border-0 shadow-lg">
-              <CardHeader>
-                <CardTitle>Meeting Participants</CardTitle>
-                <CardDescription>Team members who attended this meeting</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {meetingData.participants.map((participant, index) => (
-                    <div key={index} className="flex items-center space-x-3 p-3 border rounded-lg">
-                      <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-purple-600 rounded-full flex items-center justify-center text-white font-semibold">
-                        {participant.split(' ').map(n => n[0]).join('')}
-                      </div>
-                      <div>
-                        <p className="font-medium text-gray-900">{participant}</p>
-                        <p className="text-sm text-gray-600">Team Member</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-        </Tabs>
+        {/* Slack Integration Section */}
+        {meeting.status === 'processed' && (
+          <div className="mb-6">
+            <SlackNotification
+              meetingId={meeting.id}
+              teamId={meeting.teamId || ''}
+              meetingTitle={meeting.title}
+              slackIntegration={slackIntegration}
+              notificationStatus={{
+                sent: meeting.slackNotificationSent || false,
+                sentAt: meeting.slackNotificationSentAt,
+                sentBy: meeting.slackNotificationSentBy
+              }}
+              onNotificationSent={handleSlackNotificationSent}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
 };
 
 export default MeetingDetails;
+
+
