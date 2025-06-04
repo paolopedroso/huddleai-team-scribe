@@ -13,7 +13,8 @@ import {
   Timestamp,
   orderBy,
   limit,
-  deleteField
+  deleteField,
+  deleteDoc
 } from 'firebase/firestore';
 import { db } from './firebase';
 import { auth } from './firebase';
@@ -318,34 +319,26 @@ export const ensureUserProfileExists = async (userId: string, displayName: strin
   }
 };
 
-// Get team members with role and status information
+// Get team members for a team
 export const getTeamMembers = async (teamId: string): Promise<TeamMember[]> => {
   try {
+    // First get the team to get member IDs
     const team = await getTeamById(teamId);
-    if (!team) {
-      throw new Error("Team not found");
+    if (!team || !team.members || team.members.length === 0) {
+      return [];
     }
+
+    // Get all member profiles
+    const memberProfiles = await getUsersByIds(team.members);
     
-    const teamMembers: TeamMember[] = [];
-    
-    for (const memberId of team.members) {
-      const user = await getUserById(memberId);
-      if (user) {
-        // Get user's role in this team
-        const userRole = await getUserRoleInTeam(memberId, teamId);
-        
-        // Get user's join date for this team
-        const joinDate = user.teamJoinDates?.[teamId] || team.createdAt;
-        
-        teamMembers.push({
-          ...user,
-          role: userRole || 'member',
-          joinedDate: joinDate,
-          status: user.status || 'offline'
-        });
-      }
-    }
-    
+    // Convert to TeamMember format
+    const teamMembers: TeamMember[] = memberProfiles.map(profile => ({
+      ...profile,
+      role: profile.role || 'member', // Default role if not specified
+      status: profile.status || 'offline', // Default status if not specified
+      joinedDate: profile.lastActive || team.createdAt // Use lastActive or team creation date as fallback
+    }));
+
     return teamMembers;
   } catch (error) {
     console.error("Error getting team members:", error);
@@ -542,9 +535,72 @@ export const transferTeamOwnership = async (teamId: string, newOwnerId: string):
   }
 };
 
+// Get all meetings for a team with optional filtering and ordering
+export const getAllMeetingsForTeam = async (
+  teamId: string, 
+  orderByField: 'date' | 'createdAt' = 'date',
+  orderDirection: 'desc' | 'asc' = 'desc',
+  statusFilter?: 'uploaded' | 'processing' | 'processed' | 'failed',
+  userId?: string // Optional parameter for additional security
+) => {
+  try {
+    // Security validation: Ensure teamId is not empty
+    if (!teamId || teamId.trim() === '') {
+      console.warn("getAllMeetingsForTeam: teamId is empty, returning empty array to prevent data leak");
+      return [];
+    }
+    
+    // Additional security: Verify user has access to team if userId is provided
+    if (userId) {
+      try {
+        const userTeams = await getUserTeams(userId);
+        if (!userTeams.teams.includes(teamId)) {
+          console.warn(`getAllMeetingsForTeam: User ${userId} does not belong to team ${teamId}, returning empty array`);
+          return [];
+        }
+      } catch (error) {
+        console.warn("getAllMeetingsForTeam: Error checking user team membership, proceeding with caution");
+      }
+    }
+    
+    const meetingsRef = collection(db, 'meetings');
+    let q = query(
+      meetingsRef,
+      where('teamId', '==', teamId)
+    );
+
+    // Add status filter if provided
+    if (statusFilter) {
+      q = query(q, where('status', '==', statusFilter));
+    }
+
+    // Add ordering
+    q = query(q, orderBy(orderByField, orderDirection));
+    
+    const querySnapshot = await getDocs(q);
+    const meetings: Meeting[] = [];
+    
+    querySnapshot.forEach((doc) => {
+      const meeting = { id: doc.id, ...doc.data() } as Meeting;
+      meetings.push(meeting);
+    });
+    
+    return meetings;
+  } catch (error) {
+    console.error("Error getting all team meetings:", error);
+    throw error;
+  }
+};
+
 // Get recent meetings for a team
 export const getRecentMeetingsForTeam = async (teamId: string, count: number = 5) => {
   try {
+    // Security validation: Ensure teamId is not empty
+    if (!teamId || teamId.trim() === '') {
+      console.warn("getRecentMeetingsForTeam: teamId is empty, returning empty array to prevent data leak");
+      return [];
+    }
+    
     const meetingsRef = collection(db, 'meetings');
     const q = query(
       meetingsRef,
@@ -570,6 +626,19 @@ export const getRecentMeetingsForTeam = async (teamId: string, count: number = 5
 // Get total meeting stats for a team
 export const getTeamMeetingStats = async (teamId: string) => {
   try {
+    // Security validation: Ensure teamId is not empty
+    if (!teamId || teamId.trim() === '') {
+      console.warn("getTeamMeetingStats: teamId is empty, returning empty stats to prevent data leak");
+      return {
+        totalMeetings: 0,
+        totalDuration: 0,
+        processedMeetings: 0,
+        totalActionItems: 0,
+        completedActionItems: 0,
+        averageDuration: 0
+      };
+    }
+    
     const meetingsRef = collection(db, 'meetings');
     const q = query(meetingsRef, where('teamId', '==', teamId));
     
@@ -902,6 +971,343 @@ export const disableSlackIntegration = async (teamId: string): Promise<void> => 
     });
   } catch (error) {
     console.error("Error disabling Slack integration:", error);
+    throw error;
+  }
+};
+
+// Action Item Management Functions
+
+// Get all action items for a team from all meetings
+export const getTeamActionItems = async (teamId: string, userId?: string) => {
+  try {
+    // Security validation: Ensure teamId is not empty
+    if (!teamId || teamId.trim() === '') {
+      console.warn("getTeamActionItems: teamId is empty, returning empty array to prevent data leak");
+      return [];
+    }
+    
+    // Additional security: Verify user has access to team if userId is provided
+    if (userId) {
+      try {
+        const userTeams = await getUserTeams(userId);
+        if (!userTeams.teams.includes(teamId)) {
+          console.warn(`getTeamActionItems: User ${userId} does not belong to team ${teamId}, returning empty array`);
+          return [];
+        }
+      } catch (error) {
+        console.warn("getTeamActionItems: Error checking user team membership, proceeding with caution");
+      }
+    }
+    
+    const meetingsRef = collection(db, 'meetings');
+    const q = query(
+      meetingsRef,
+      where('teamId', '==', teamId),
+      orderBy('date', 'desc')
+    );
+    
+    const querySnapshot = await getDocs(q);
+    const allActionItems: (ActionItem & { teamId: string; meetingTitle?: string })[] = [];
+    
+    querySnapshot.forEach((doc) => {
+      const meeting = doc.data() as Meeting;
+      
+      // Process regular action items
+      if (meeting.actionItems && meeting.actionItems.length > 0) {
+        meeting.actionItems.forEach(item => {
+          allActionItems.push({
+            ...item,
+            teamId,
+            meetingId: meeting.id,
+            meetingTitle: meeting.title
+          });
+        });
+      }
+      
+      // Process AI-generated action items
+      if (meeting.aiActionItems && meeting.aiActionItems.length > 0) {
+        meeting.aiActionItems.forEach(item => {
+          allActionItems.push({
+            ...item,
+            teamId,
+            meetingId: meeting.id,
+            meetingTitle: meeting.title
+          });
+        });
+      }
+    });
+    
+    // Sort by creation date (newest first)
+    allActionItems.sort((a, b) => {
+      const aTime = a.createdAt?.toDate?.() || new Date(0);
+      const bTime = b.createdAt?.toDate?.() || new Date(0);
+      return bTime.getTime() - aTime.getTime();
+    });
+    
+    return allActionItems;
+  } catch (error) {
+    console.error("Error getting team action items:", error);
+    throw error;
+  }
+};
+
+// Get action items for a specific meeting
+export const getMeetingActionItems = async (meetingId: string) => {
+  try {
+    const meetingRef = doc(db, 'meetings', meetingId);
+    const meetingDoc = await getDoc(meetingRef);
+    
+    if (!meetingDoc.exists()) {
+      return [];
+    }
+    
+    const meeting = meetingDoc.data() as Meeting;
+    const actionItems: ActionItem[] = [];
+    
+    // Add regular action items
+    if (meeting.actionItems) {
+      actionItems.push(...meeting.actionItems);
+    }
+    
+    // Add AI-generated action items
+    if (meeting.aiActionItems) {
+      actionItems.push(...meeting.aiActionItems);
+    }
+    
+    return actionItems;
+  } catch (error) {
+    console.error("Error getting meeting action items:", error);
+    throw error;
+  }
+};
+
+// Create a new action item and add it to the specified meeting
+export const createActionItem = async (actionItemData: {
+  description: string;
+  assignedTo?: string;
+  assignedToName?: string;
+  dueDate?: string;
+  status?: 'pending' | 'in-progress' | 'completed';
+  meetingId: string; // Required for manual creation
+  teamId: string;
+}) => {
+  try {
+    // Generate a unique ID for the action item
+    const actionItemId = doc(collection(db, 'temp')).id;
+    
+    // Use regular JavaScript Date instead of serverTimestamp for arrays
+    const now = new Date();
+    
+    const actionItem: ActionItem = {
+      id: actionItemId,
+      description: actionItemData.description,
+      assignedTo: actionItemData.assignedTo,
+      assignedToName: actionItemData.assignedToName,
+      dueDate: actionItemData.dueDate,
+      status: actionItemData.status || 'pending',
+      meetingId: actionItemData.meetingId,
+      createdAt: now as any, // Use regular Date instead of serverTimestamp
+      updatedAt: now as any  // Use regular Date instead of serverTimestamp
+    };
+    
+    // Add the action item to the meeting's actionItems array
+    const meetingRef = doc(db, 'meetings', actionItemData.meetingId);
+    await updateDoc(meetingRef, {
+      actionItems: arrayUnion(actionItem),
+      updatedAt: serverTimestamp()
+    });
+    
+    return actionItemId;
+  } catch (error) {
+    console.error("Error creating action item:", error);
+    throw error;
+  }
+};
+
+// Update an action item within a meeting
+export const updateActionItem = async (
+  actionItemId: string,
+  meetingId: string,
+  updates: Partial<{
+    description: string;
+    assignedTo: string;
+    assignedToName: string;
+    dueDate: string;
+    status: 'pending' | 'in-progress' | 'completed';
+  }>
+) => {
+  try {
+    // Get the meeting
+    const meetingRef = doc(db, 'meetings', meetingId);
+    const meetingDoc = await getDoc(meetingRef);
+    
+    if (!meetingDoc.exists()) {
+      throw new Error("Meeting not found");
+    }
+    
+    const meeting = meetingDoc.data() as Meeting;
+    
+    // Create a regular JavaScript Date instead of serverTimestamp for arrays
+    const now = new Date();
+    
+    // Find and update the action item in actionItems array
+    let updated = false;
+    if (meeting.actionItems) {
+      const updatedActionItems = meeting.actionItems.map(item => {
+        if (item.id === actionItemId) {
+          updated = true;
+          return {
+            ...item,
+            ...updates,
+            updatedAt: now as any // Use regular Date instead of serverTimestamp
+          };
+        }
+        return item;
+      });
+      
+      if (updated) {
+        await updateDoc(meetingRef, {
+          actionItems: updatedActionItems,
+          updatedAt: serverTimestamp()
+        });
+        return true;
+      }
+    }
+    
+    // If not found in actionItems, check aiActionItems
+    if (meeting.aiActionItems && !updated) {
+      const updatedAiActionItems = meeting.aiActionItems.map(item => {
+        if (item.id === actionItemId) {
+          updated = true;
+          return {
+            ...item,
+            ...updates,
+            updatedAt: now as any // Use regular Date instead of serverTimestamp
+          };
+        }
+        return item;
+      });
+      
+      if (updated) {
+        await updateDoc(meetingRef, {
+          aiActionItems: updatedAiActionItems,
+          updatedAt: serverTimestamp()
+        });
+        return true;
+      }
+    }
+    
+    if (!updated) {
+      throw new Error("Action item not found");
+    }
+    
+    return true;
+  } catch (error) {
+    console.error("Error updating action item:", error);
+    throw error;
+  }
+};
+
+// Delete an action item from a meeting
+export const deleteActionItem = async (actionItemId: string, meetingId: string) => {
+  try {
+    // Get the meeting
+    const meetingRef = doc(db, 'meetings', meetingId);
+    const meetingDoc = await getDoc(meetingRef);
+    
+    if (!meetingDoc.exists()) {
+      throw new Error("Meeting not found");
+    }
+    
+    const meeting = meetingDoc.data() as Meeting;
+    
+    // Remove from actionItems array
+    if (meeting.actionItems) {
+      const actionItemToRemove = meeting.actionItems.find(item => item.id === actionItemId);
+      if (actionItemToRemove) {
+        await updateDoc(meetingRef, {
+          actionItems: arrayRemove(actionItemToRemove),
+          updatedAt: serverTimestamp()
+        });
+        return true;
+      }
+    }
+    
+    // Remove from aiActionItems array
+    if (meeting.aiActionItems) {
+      const actionItemToRemove = meeting.aiActionItems.find(item => item.id === actionItemId);
+      if (actionItemToRemove) {
+        await updateDoc(meetingRef, {
+          aiActionItems: arrayRemove(actionItemToRemove),
+          updatedAt: serverTimestamp()
+        });
+        return true;
+      }
+    }
+    
+    throw new Error("Action item not found");
+  } catch (error) {
+    console.error("Error deleting action item:", error);
+    throw error;
+  }
+};
+
+// Get action item by ID from a specific meeting
+export const getActionItemById = async (actionItemId: string, meetingId: string) => {
+  try {
+    const meetingRef = doc(db, 'meetings', meetingId);
+    const meetingDoc = await getDoc(meetingRef);
+    
+    if (!meetingDoc.exists()) {
+      return null;
+    }
+    
+    const meeting = meetingDoc.data() as Meeting;
+    
+    // Search in actionItems
+    if (meeting.actionItems) {
+      const actionItem = meeting.actionItems.find(item => item.id === actionItemId);
+      if (actionItem) {
+        return { ...actionItem, teamId: meeting.teamId, meetingTitle: meeting.title };
+      }
+    }
+    
+    // Search in aiActionItems
+    if (meeting.aiActionItems) {
+      const actionItem = meeting.aiActionItems.find(item => item.id === actionItemId);
+      if (actionItem) {
+        return { ...actionItem, teamId: meeting.teamId, meetingTitle: meeting.title };
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error("Error getting action item:", error);
+    throw error;
+  }
+};
+
+// Get action items assigned to a specific user
+export const getUserActionItems = async (userId: string, teamId: string) => {
+  try {
+    const allActionItems = await getTeamActionItems(teamId, userId);
+    return allActionItems.filter(item => item.assignedTo === userId);
+  } catch (error) {
+    console.error("Error getting user action items:", error);
+    throw error;
+  }
+};
+
+// Update action item status
+export const updateActionItemStatus = async (
+  actionItemId: string, 
+  meetingId: string,
+  status: 'pending' | 'in-progress' | 'completed'
+) => {
+  try {
+    return await updateActionItem(actionItemId, meetingId, { status });
+  } catch (error) {
+    console.error("Error updating action item status:", error);
     throw error;
   }
 }; 

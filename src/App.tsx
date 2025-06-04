@@ -19,6 +19,7 @@ import Integrations from "./pages/Integrations";
 import TeamSettings from "./pages/TeamSettings";
 import MemberManagement from "./pages/MemberManagement";
 import MeetingManagement from "./pages/MeetingManagement";
+import ActionItems from "./pages/ActionItems";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -98,6 +99,11 @@ const App = () => (
             <Route path="/meeting-management" element={
               <ProtectedRoute>
                 <MeetingManagement />
+              </ProtectedRoute>
+            } />
+            <Route path="/action-items" element={
+              <ProtectedRoute>
+                <ActionItems />
               </ProtectedRoute>
             } />
             {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}

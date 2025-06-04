@@ -55,12 +55,6 @@ const Team = () => {
   const [isLoadingStats, setIsLoadingStats] = useState(true);
   const [loading, setLoading] = useState(true);
   const [teamData, setTeamData] = useState<any>(null);
-  const [teamStats, setTeamStats] = useState({
-    totalMeetings: 0,
-    totalDuration: 0,
-    processedMeetings: 0,
-    pendingMeetings: 0
-  });
   const [slackIntegration, setSlackIntegration] = useState<any>(null);
 
   useEffect(() => {
@@ -199,6 +193,7 @@ const Team = () => {
       setIsLoadingStats(true);
       const stats = await getTeamMeetingStats(teamId);
       setMeetingStats(stats);
+      console.log("Meeting stats loaded:", stats);
     } catch (error) {
       console.error("Error loading meeting stats:", error);
       toast({
@@ -218,10 +213,31 @@ const Team = () => {
       const refreshedTeam = await getTeamById(team.id);
       if (refreshedTeam) {
         setTeam(refreshedTeam);
-        loadTeamMembers(refreshedTeam.members);
+        await loadTeamMembers(refreshedTeam.members);
+        await loadRecentMeetings(refreshedTeam.id);
+        await loadMeetingStats(refreshedTeam.id);
+        
+        // Refresh Slack integration data
+        try {
+          const teamRef = doc(db, "teams", refreshedTeam.id);
+          const teamDoc = await getDoc(teamRef);
+          
+          if (teamDoc.exists()) {
+            const teamInfo = teamDoc.data();
+            setTeamData(teamInfo);
+            setSlackIntegration(teamInfo.slackIntegration || null);
+          }
+        } catch (error) {
+          console.error("Error fetching updated team data:", error);
+        }
       }
     } catch (error) {
       console.error("Error refreshing team data:", error);
+      toast({
+        variant: "destructive",
+        title: "Error refreshing team",
+        description: "There was a problem refreshing your team data."
+      });
     }
   };
 
@@ -265,16 +281,16 @@ const Team = () => {
   };
   
   const formatDuration = (durationInSeconds?: number) => {
-    if (!durationInSeconds) return "0 mins";
+    if (!durationInSeconds || durationInSeconds === 0) return "0 mins";
     
     const minutes = Math.floor(durationInSeconds / 60);
     const hours = Math.floor(minutes / 60);
     
     if (hours > 0) {
       const remainingMinutes = minutes % 60;
-      return `${hours}h ${remainingMinutes > 0 ? remainingMinutes + 'm' : ''}`;
+      return `${hours}h${remainingMinutes > 0 ? ` ${remainingMinutes}m` : ''}`;
     } else {
-      return `${minutes} mins`;
+      return `${minutes}m`;
     }
   };
   
@@ -283,6 +299,19 @@ const Team = () => {
     
     const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
     return date.toLocaleDateString();
+  };
+
+  const formatTotalDuration = (durationInSeconds: number) => {
+    if (!durationInSeconds) return "0 mins";
+    
+    const hours = Math.floor(durationInSeconds / 3600);
+    const minutes = Math.floor((durationInSeconds % 3600) / 60);
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    } else {
+      return `${minutes}m`;
+    }
   };
 
   if (isLoadingTeam) {
@@ -385,6 +414,12 @@ const Team = () => {
               </svg>
               Refresh
             </Button>
+            <Link to="/action-items">
+              <Button variant="outline">
+                <CheckCircle2 className="w-4 h-4 mr-2" />
+                Action Items
+              </Button>
+            </Link>
             <Link to="/team-settings">
               <Button variant="outline">
                 <Settings className="w-4 h-4 mr-2" />
@@ -401,14 +436,21 @@ const Team = () => {
         </div>
 
         {/* Quick Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-6 mb-6">
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">Total Meetings</CardTitle>
               <FileText className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{teamStats.totalMeetings}</div>
+              {isLoadingStats ? (
+                <div className="text-2xl font-bold animate-pulse bg-gray-200 h-8 w-16 rounded"></div>
+              ) : (
+                <div className="text-2xl font-bold">{meetingStats?.totalMeetings || 0}</div>
+              )}
+              <p className="text-xs text-muted-foreground">
+                {isLoadingStats ? "Loading..." : "All time"}
+              </p>
             </CardContent>
           </Card>
           
@@ -418,9 +460,16 @@ const Team = () => {
               <Clock className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">
-                {Math.round(teamStats.totalDuration / 60)}m
-              </div>
+              {isLoadingStats ? (
+                <div className="text-2xl font-bold animate-pulse bg-gray-200 h-8 w-20 rounded"></div>
+              ) : (
+                <div className="text-2xl font-bold">
+                  {formatTotalDuration(meetingStats?.totalDuration || 0)}
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground">
+                {isLoadingStats ? "Loading..." : `Avg: ${formatDuration(meetingStats?.averageDuration || 0)}`}
+              </p>
             </CardContent>
           </Card>
           
@@ -430,37 +479,85 @@ const Team = () => {
               <CheckCircle2 className="h-4 w-4 text-green-500" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{teamStats.processedMeetings}</div>
+              {isLoadingStats ? (
+                <div className="text-2xl font-bold animate-pulse bg-gray-200 h-8 w-12 rounded"></div>
+              ) : (
+                <div className="text-2xl font-bold">{meetingStats?.processedMeetings || 0}</div>
+              )}
+              <p className="text-xs text-muted-foreground">
+                {isLoadingStats ? "Loading..." : 
+                  meetingStats?.totalMeetings ? 
+                    `${Math.round((meetingStats.processedMeetings / meetingStats.totalMeetings) * 100)}% success rate` :
+                    "No meetings yet"
+                }
+              </p>
             </CardContent>
           </Card>
           
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Slack Integration</CardTitle>
-              <Slack className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
+          <Link to="/action-items">
+            <Card className="hover:shadow-lg transition-shadow cursor-pointer">
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Action Items</CardTitle>
+                <BarChart3 className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                {isLoadingStats ? (
+                  <div className="text-2xl font-bold animate-pulse bg-gray-200 h-8 w-12 rounded"></div>
+                ) : (
+                  <div className="text-2xl font-bold">{meetingStats?.totalActionItems || 0}</div>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  {isLoadingStats ? "Loading..." : 
+                    meetingStats?.totalActionItems ? 
+                      `${meetingStats.completedActionItems} completed` :
+                      "No action items"
+                  }
+                </p>
+              </CardContent>
+            </Card>
+          </Link>
+        </div>
+
+        {/* Slack Integration Status */}
+        <Card className="mb-8 border-0 shadow-lg">
+          <CardContent className="pt-6">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="flex items-center justify-center w-10 h-10 bg-purple-100 rounded-lg">
+                  <Slack className="w-5 h-5 text-purple-600" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-medium text-gray-900">Slack Integration</h3>
+                  <p className="text-xs text-gray-500">
+                    {slackIntegration?.isActive ? (
+                      <>Connected to #{slackIntegration.channelName}</>
+                    ) : (
+                      "Connect your team's Slack workspace for automated notifications"
+                    )}
+                  </p>
+                </div>
+              </div>
               <div className="flex items-center space-x-2">
                 {slackIntegration?.isActive ? (
                   <>
-                    <CheckCircle2 className="h-4 w-4 text-green-500" />
-                    <span className="text-sm font-medium text-green-600">Active</span>
+                    <Badge className="bg-green-100 text-green-800">Active</Badge>
+                    <Link to="/team-settings">
+                      <Button size="sm" variant="outline">
+                        Manage
+                      </Button>
+                    </Link>
                   </>
                 ) : (
-                  <>
-                    <AlertCircle className="h-4 w-4 text-gray-400" />
-                    <span className="text-sm text-gray-500">Not configured</span>
-                  </>
+                  <Link to="/team-settings">
+                    <Button size="sm">
+                      Setup Integration
+                    </Button>
+                  </Link>
                 )}
               </div>
-              {slackIntegration?.isActive && (
-                <div className="text-xs text-gray-500 mt-1">
-                  #{slackIntegration.channelName}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+            </div>
+          </CardContent>
+        </Card>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           {/* Team Members */}

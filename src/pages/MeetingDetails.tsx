@@ -22,25 +22,43 @@ import {
   X,
   Loader2,
   RefreshCw,
-  Slack
+  Slack,
+  Plus,
+  User,
+  CalendarIcon,
+  MoreVertical,
+  Play
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { format } from "date-fns";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
-import { Meeting, getUserById, UserProfile, Comment } from "@/lib/db";
+import { Meeting, getUserById, UserProfile, Comment, ActionItem, getTeamMembers, TeamMember, createActionItem, updateActionItem, deleteActionItem } from "@/lib/db";
 import { deleteMeeting, updateMeeting, addCommentToMeeting, deleteComment, pollMeetingStatus, reprocessMeeting } from "@/lib/meetings";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { CalendarIcon } from "@radix-ui/react-icons";
 import { Calendar as CalendarComponent } from "@/components/ui/calendar";
 import { cn } from "@/lib/utils";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { SlackNotification } from "@/components/SlackNotification";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 const MeetingDetails = () => {
   const [searchParams] = useSearchParams();
@@ -67,6 +85,21 @@ const MeetingDetails = () => {
   const [pollingError, setPollingError] = useState<string | null>(null);
   const pollingRef = useRef<boolean>(false);
   
+  // Action Items CRUD state
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [isEditActionItemDialogOpen, setIsEditActionItemDialogOpen] = useState(false);
+  const [editingActionItem, setEditingActionItem] = useState<ActionItem | null>(null);
+  const [isActionItemLoading, setIsActionItemLoading] = useState(false);
+  
+  // Action Item Form state (only for editing)
+  const [actionItemForm, setActionItemForm] = useState({
+    description: "",
+    assignedTo: "",
+    assignedToName: "",
+    dueDate: "",
+    status: "pending" as "pending" | "in-progress" | "completed"
+  });
+
   // Edit form state
   const [editForm, setEditForm] = useState({
     title: "",
@@ -220,20 +253,24 @@ const MeetingDetails = () => {
           setAllTeamMembers(validProfiles);
         }
         
-        // Fetch team data and Slack integration
+        // Load team data
         if (meetingData.teamId) {
-          try {
-            const teamRef = doc(db, "teams", meetingData.teamId);
-            const teamDoc = await getDoc(teamRef);
+          // Load team information
+          const teamRef = doc(db, "teams", meetingData.teamId);
+          const teamDoc = await getDoc(teamRef);
+          
+          if (teamDoc.exists()) {
+            const teamInfo = { id: teamDoc.id, ...teamDoc.data() };
+            setTeamData(teamInfo);
+            setSlackIntegration((teamInfo as any).slackIntegration || null);
             
-            if (teamDoc.exists()) {
-              const teamInfo = teamDoc.data();
-              setTeamData(teamInfo);
-              setSlackIntegration(teamInfo.slackIntegration || null);
+            // Load team members for action items
+            try {
+              const members = await getTeamMembers(meetingData.teamId);
+              setTeamMembers(members);
+            } catch (error) {
+              console.error("Error loading team members:", error);
             }
-          } catch (teamError) {
-            console.error("Error fetching team data:", teamError);
-            // Don't fail the whole page if team data fails
           }
         }
         
@@ -284,6 +321,38 @@ const MeetingDetails = () => {
     return format(date, "PPP");
   };
   
+  const formatCommentDate = (timestamp: any) => {
+    if (!timestamp) return "";
+    
+    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+    return format(date, "MMM d, yyyy 'at' h:mm a");
+  };
+
+  // Add a safe date formatting function for action items
+  const formatActionItemDate = (timestamp: any) => {
+    if (!timestamp) return "";
+    
+    try {
+      // Handle Firestore Timestamp
+      if (timestamp.toDate && typeof timestamp.toDate === 'function') {
+        return timestamp.toDate().toLocaleDateString();
+      }
+      // Handle JavaScript Date
+      if (timestamp instanceof Date) {
+        return timestamp.toLocaleDateString();
+      }
+      // Handle string dates
+      const date = new Date(timestamp);
+      if (!isNaN(date.getTime())) {
+        return date.toLocaleDateString();
+      }
+      return "";
+    } catch (error) {
+      console.error("Error formatting date:", error);
+      return "";
+    }
+  };
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case "processed":
@@ -474,13 +543,6 @@ const MeetingDetails = () => {
     }
   };
   
-  const formatCommentDate = (timestamp: any) => {
-    if (!timestamp) return "";
-    
-    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-    return format(date, "MMM d, yyyy 'at' h:mm a");
-  };
-
   const handleReprocess = async () => {
     if (!meetingId) return;
     
@@ -511,10 +573,8 @@ const MeetingDetails = () => {
   };
 
   const handleSlackNotificationSent = async () => {
-    // Refresh meeting data to get updated Slack notification status
-    if (!meetingId) return;
-    
-    try {
+    // Refresh meeting data to update the slack notification status
+    if (meetingId) {
       const meetingRef = doc(db, "meetings", meetingId);
       const meetingDoc = await getDoc(meetingRef);
       
@@ -522,8 +582,151 @@ const MeetingDetails = () => {
         const updatedMeetingData = { id: meetingDoc.id, ...meetingDoc.data() } as Meeting;
         setMeeting(updatedMeetingData);
       }
+    }
+  };
+
+  // Action Items CRUD Functions
+  const resetActionItemForm = () => {
+    setActionItemForm({
+      description: "",
+      assignedTo: "",
+      assignedToName: "",
+      dueDate: "",
+      status: "pending"
+    });
+  };
+
+  const loadTeamMembers = async () => {
+    if (!meeting?.teamId) return;
+    
+    try {
+      const members = await getTeamMembers(meeting.teamId);
+      setTeamMembers(members);
     } catch (error) {
-      console.error("Error refreshing meeting data:", error);
+      console.error("Error loading team members:", error);
+    }
+  };
+
+  const handleEditActionItem = (item: ActionItem) => {
+    setEditingActionItem(item);
+    setActionItemForm({
+      description: item.description,
+      assignedTo: item.assignedTo || "",
+      assignedToName: item.assignedToName || "",
+      dueDate: item.dueDate || "",
+      status: item.status
+    });
+    setIsEditActionItemDialogOpen(true);
+  };
+
+  const handleUpdateActionItem = async () => {
+    if (!editingActionItem || !meeting?.id) return;
+    
+    try {
+      setIsActionItemLoading(true);
+      
+      if (!actionItemForm.description.trim()) {
+        toast({
+          variant: "destructive",
+          title: "Error",
+          description: "Please enter a description for the action item."
+        });
+        return;
+      }
+
+      await updateActionItem(editingActionItem.id, meeting.id, {
+        description: actionItemForm.description,
+        assignedTo: actionItemForm.assignedTo || undefined,
+        assignedToName: actionItemForm.assignedToName || undefined,
+        dueDate: actionItemForm.dueDate || undefined,
+        status: actionItemForm.status
+      });
+
+      toast({
+        title: "Action item updated",
+        description: "The action item has been successfully updated."
+      });
+
+      // Refresh meeting data
+      const meetingRef = doc(db, "meetings", meeting.id);
+      const meetingDoc = await getDoc(meetingRef);
+      
+      if (meetingDoc.exists()) {
+        const updatedMeetingData = { id: meetingDoc.id, ...meetingDoc.data() } as Meeting;
+        setMeeting(updatedMeetingData);
+      }
+
+      setIsEditActionItemDialogOpen(false);
+      setEditingActionItem(null);
+      resetActionItemForm();
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Error updating action item",
+        description: error instanceof Error ? error.message : "An error occurred"
+      });
+    } finally {
+      setIsActionItemLoading(false);
+    }
+  };
+
+  const handleDeleteActionItem = async (item: ActionItem) => {
+    if (!meeting?.id) return;
+    
+    try {
+      setIsActionItemLoading(true);
+
+      await deleteActionItem(item.id, meeting.id);
+
+      toast({
+        title: "Action item deleted",
+        description: "The action item has been successfully deleted."
+      });
+
+      // Refresh meeting data
+      const meetingRef = doc(db, "meetings", meeting.id);
+      const meetingDoc = await getDoc(meetingRef);
+      
+      if (meetingDoc.exists()) {
+        const updatedMeetingData = { id: meetingDoc.id, ...meetingDoc.data() } as Meeting;
+        setMeeting(updatedMeetingData);
+      }
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Error deleting action item",
+        description: error instanceof Error ? error.message : "An error occurred"
+      });
+    } finally {
+      setIsActionItemLoading(false);
+    }
+  };
+
+  const handleStatusChange = async (item: ActionItem, newStatus: "pending" | "in-progress" | "completed") => {
+    if (!meeting?.id) return;
+    
+    try {
+      await updateActionItem(item.id, meeting.id, { status: newStatus });
+
+      toast({
+        title: "Status updated",
+        description: `Action item marked as ${newStatus.replace('-', ' ')}.`
+      });
+
+      // Refresh meeting data
+      const meetingRef = doc(db, "meetings", meeting.id);
+      const meetingDoc = await getDoc(meetingRef);
+      
+      if (meetingDoc.exists()) {
+        const updatedMeetingData = { id: meetingDoc.id, ...meetingDoc.data() } as Meeting;
+        setMeeting(updatedMeetingData);
+      }
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Error updating status",
+        description: error instanceof Error ? error.message : "An error occurred"
+      });
     }
   };
 
@@ -921,13 +1124,17 @@ const MeetingDetails = () => {
         {/* Action Items Section */}
         <Card className="border-0 shadow-md mb-6">
           <CardHeader className="pb-2">
-            <CardTitle className="flex items-center text-lg">
-              <CheckCircle2 className="w-5 h-5 mr-2 text-green-500" />
-              Action Items
-            </CardTitle>
-            <CardDescription>
-              Tasks and follow-ups identified from this meeting
-            </CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="flex items-center text-lg">
+                  <CheckCircle2 className="w-5 h-5 mr-2 text-green-500" />
+                  Action Items
+                </CardTitle>
+                <CardDescription>
+                  Tasks and follow-ups generated from this meeting
+                </CardDescription>
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
             {(meeting.status === 'processing' || meeting.status === 'uploaded') ? (
@@ -948,53 +1155,182 @@ const MeetingDetails = () => {
                   )}
                 </div>
               </div>
-            ) : meeting.aiActionItems && meeting.aiActionItems.length > 0 ? (
-              <div className="space-y-3">
-                {meeting.aiActionItems.map((item, index) => (
-                  <div key={index} className="p-4 border rounded-lg bg-gradient-to-r from-indigo-50 to-purple-50">
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <p className="text-gray-800 font-medium text-sm mb-2">{item.description}</p>
-                        <div className="flex flex-wrap gap-2 text-xs">
-                          {item.assignedTo && (
-                            <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">
-                              Assigned to: {item.assignedTo}
-                            </span>
-                          )}
-                          {item.dueDate && (
-                            <span className="bg-orange-100 text-orange-800 px-2 py-1 rounded">
-                              Due: {item.dueDate}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <Badge variant="secondary" className="text-xs ml-3">
-                        {item.status}
-                      </Badge>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : meeting.actionItems && meeting.actionItems.length > 0 ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {meeting.actionItems.map((item, i) => (
-                  <div key={i} className="flex items-start space-x-2 p-3 border rounded-md">
-                    <CheckCircle2 className="w-4 h-4 text-green-500 mt-0.5" />
-                    <div className="flex-1">
-                      <p className="text-gray-800 font-medium text-sm">{item.description}</p>
-                      {item.assignedToName && (
-                        <p className="text-xs text-gray-500 mt-1">Assigned to: {item.assignedToName}</p>
-                      )}
-                    </div>
-                    <Badge variant={item.status === 'completed' ? 'outline' : 'secondary'} className="text-xs">
-                      {item.status === 'completed' ? 'Completed' : 
-                       item.status === 'in-progress' ? 'In Progress' : 'Pending'}
-                    </Badge>
-                  </div>
-                ))}
-              </div>
             ) : (
-              <p className="text-gray-500 text-center py-4 text-sm">No action items identified</p>
+              <>
+                {/* AI Generated Action Items */}
+                {meeting.aiActionItems && meeting.aiActionItems.length > 0 && (
+                  <div className="mb-6">
+                    <div className="space-y-3">
+                      {meeting.aiActionItems.map((item, index) => (
+                        <div key={`ai-${index}`} className="p-4 border rounded-lg bg-gradient-to-r from-indigo-50 to-purple-50">
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <p className="text-gray-800 font-medium text-sm mb-2">{item.description}</p>
+                              <div className="flex flex-wrap gap-2 text-xs">
+                                {item.assignedToName && (
+                                  <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">
+                                    Assigned to: {item.assignedToName}
+                                  </span>
+                                )}
+                                {item.dueDate && (
+                                  <span className="bg-orange-100 text-orange-800 px-2 py-1 rounded">
+                                    Due: {new Date(item.dueDate).toLocaleDateString()}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="flex items-center space-x-2 ml-3">
+                              <Badge variant="secondary" className="text-xs">
+                                {item.status === 'completed' ? 'Completed' : 
+                                 item.status === 'in-progress' ? 'In Progress' : 'Pending'}
+                              </Badge>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
+                                    <MoreVertical className="w-3 h-3" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  {item.status !== 'pending' && (
+                                    <DropdownMenuItem onClick={() => handleStatusChange(item, 'pending')}>
+                                      <Clock className="w-4 h-4 mr-2" />
+                                      Mark as Pending
+                                    </DropdownMenuItem>
+                                  )}
+                                  {item.status !== 'in-progress' && (
+                                    <DropdownMenuItem onClick={() => handleStatusChange(item, 'in-progress')}>
+                                      <Play className="w-4 h-4 mr-2" />
+                                      Mark as In Progress
+                                    </DropdownMenuItem>
+                                  )}
+                                  {item.status !== 'completed' && (
+                                    <DropdownMenuItem onClick={() => handleStatusChange(item, 'completed')}>
+                                      <CheckCircle2 className="w-4 h-4 mr-2" />
+                                      Mark as Completed
+                                    </DropdownMenuItem>
+                                  )}
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem onClick={() => handleEditActionItem(item)}>
+                                    <Edit className="w-4 h-4 mr-2" />
+                                    Edit
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem 
+                                    onClick={() => handleDeleteActionItem(item)}
+                                    className="text-red-600 focus:text-red-600"
+                                  >
+                                    <Trash className="w-4 h-4 mr-2" />
+                                    Delete
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Action Items from Meeting */}
+                {meeting.actionItems && meeting.actionItems.length > 0 && (
+                  <div className="mb-4">
+                    <div className="space-y-3">
+                      {meeting.actionItems.map((item, index) => (
+                        <div key={`manual-${index}`} className="p-4 border rounded-lg hover:bg-gray-50 transition-colors">
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <p className="text-gray-800 font-medium text-sm mb-2">{item.description}</p>
+                              <div className="flex flex-wrap gap-2 text-xs">
+                                {item.assignedToName && (
+                                  <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded flex items-center">
+                                    <User className="w-3 h-3 mr-1" />
+                                    {item.assignedToName}
+                                  </span>
+                                )}
+                                {item.dueDate && (
+                                  <span className="bg-orange-100 text-orange-800 px-2 py-1 rounded flex items-center">
+                                    <CalendarIcon className="w-3 h-3 mr-1" />
+                                    {new Date(item.dueDate).toLocaleDateString()}
+                                  </span>
+                                )}
+                                {item.createdAt && (
+                                  <span className="bg-gray-100 text-gray-600 px-2 py-1 rounded text-xs">
+                                    Created: {formatActionItemDate(item.createdAt)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="flex items-center space-x-2 ml-3">
+                              <Badge 
+                                variant={item.status === 'completed' ? 'default' : 'secondary'} 
+                                className={`text-xs ${
+                                  item.status === 'completed' ? 'bg-green-100 text-green-800' :
+                                  item.status === 'in-progress' ? 'bg-blue-100 text-blue-800' :
+                                  'bg-yellow-100 text-yellow-800'
+                                }`}
+                              >
+                                {item.status === 'completed' ? 'Completed' : 
+                                 item.status === 'in-progress' ? 'In Progress' : 'Pending'}
+                              </Badge>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
+                                    <MoreVertical className="w-3 h-3" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  {item.status !== 'pending' && (
+                                    <DropdownMenuItem onClick={() => handleStatusChange(item, 'pending')}>
+                                      <Clock className="w-4 h-4 mr-2" />
+                                      Mark as Pending
+                                    </DropdownMenuItem>
+                                  )}
+                                  {item.status !== 'in-progress' && (
+                                    <DropdownMenuItem onClick={() => handleStatusChange(item, 'in-progress')}>
+                                      <Play className="w-4 h-4 mr-2" />
+                                      Mark as In Progress
+                                    </DropdownMenuItem>
+                                  )}
+                                  {item.status !== 'completed' && (
+                                    <DropdownMenuItem onClick={() => handleStatusChange(item, 'completed')}>
+                                      <CheckCircle2 className="w-4 h-4 mr-2" />
+                                      Mark as Completed
+                                    </DropdownMenuItem>
+                                  )}
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem onClick={() => handleEditActionItem(item)}>
+                                    <Edit className="w-4 h-4 mr-2" />
+                                    Edit
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem 
+                                    onClick={() => handleDeleteActionItem(item)}
+                                    className="text-red-600 focus:text-red-600"
+                                  >
+                                    <Trash className="w-4 h-4 mr-2" />
+                                    Delete
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Empty State */}
+                {(!meeting.actionItems || meeting.actionItems.length === 0) && 
+                 (!meeting.aiActionItems || meeting.aiActionItems.length === 0) && (
+                  <div className="text-center py-8">
+                    <CheckCircle2 className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+                    <p className="text-gray-500 text-sm mb-2">No action items yet</p>
+                    <p className="text-gray-400 text-xs mb-4">
+                      Action items will be automatically generated from AI processing
+                    </p>
+                  </div>
+                )}
+              </>
             )}
           </CardContent>
         </Card>
@@ -1270,6 +1606,95 @@ const MeetingDetails = () => {
             />
           </div>
         )}
+
+        {/* Edit Action Item Dialog */}
+        <Dialog open={isEditActionItemDialogOpen} onOpenChange={setIsEditActionItemDialogOpen}>
+          <DialogContent className="sm:max-w-[525px]">
+            <DialogHeader>
+              <DialogTitle>Edit Action Item</DialogTitle>
+              <DialogDescription>
+                Update the action item details below.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-4 py-4">
+              <div className="grid gap-2">
+                <Label htmlFor="edit-description">Description</Label>
+                <Textarea
+                  id="edit-description"
+                  placeholder="Enter action item description..."
+                  value={actionItemForm.description}
+                  onChange={(e) => setActionItemForm(prev => ({ ...prev, description: e.target.value }))}
+                  className="min-h-[80px]"
+                />
+              </div>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="edit-assignedTo">Assign to</Label>
+                  <Select 
+                    value={actionItemForm.assignedTo || "unassigned"} 
+                    onValueChange={(value) => {
+                      const member = teamMembers.find(m => m.uid === value);
+                      setActionItemForm(prev => ({ 
+                        ...prev, 
+                        assignedTo: value === "unassigned" ? "" : value,
+                        assignedToName: value === "unassigned" ? "" : (member?.displayName || "")
+                      }));
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select team member" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="unassigned">Unassigned</SelectItem>
+                      {teamMembers.map((member) => (
+                        <SelectItem key={member.uid} value={member.uid}>
+                          {member.displayName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="edit-status">Status</Label>
+                  <Select 
+                    value={actionItemForm.status} 
+                    onValueChange={(value: "pending" | "in-progress" | "completed") => 
+                      setActionItemForm(prev => ({ ...prev, status: value }))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="pending">Pending</SelectItem>
+                      <SelectItem value="in-progress">In Progress</SelectItem>
+                      <SelectItem value="completed">Completed</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="edit-dueDate">Due Date (Optional)</Label>
+                <Input
+                  id="edit-dueDate"
+                  type="date"
+                  value={actionItemForm.dueDate}
+                  onChange={(e) => setActionItemForm(prev => ({ ...prev, dueDate: e.target.value }))}
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setIsEditActionItemDialogOpen(false)}>
+                Cancel
+              </Button>
+              <Button onClick={handleUpdateActionItem} disabled={isActionItemLoading}>
+                {isActionItemLoading && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                Update Action Item
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );
