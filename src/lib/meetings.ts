@@ -424,13 +424,16 @@ export const addCommentToMeeting = async (meetingId: string, commentText: string
     const commentId = uuidv4();
     const meetingRef = doc(db, 'meetings', meetingId);
     
+    // Use regular JavaScript Date instead of serverTimestamp for arrays
+    const now = new Date();
+    
     const comment = {
       id: commentId,
       userId: currentUser.uid,
       userName: userProfile.displayName,
       userPhotoURL: userProfile.photoURL || null,
       text: commentText,
-      timestamp: serverTimestamp()
+      timestamp: now as any // Use regular Date instead of serverTimestamp
     };
     
     await updateDoc(meetingRef, {
