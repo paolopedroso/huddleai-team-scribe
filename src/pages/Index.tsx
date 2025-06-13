@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { ArrowRight, Users, FileText, MessageSquare, Clock } from "lucide-react";
+import { ArrowRight, Users, FileText, MessageSquare, Clock, Play } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useEffect } from "react";
 import { useAuth } from "@/hooks/useAuth";
@@ -23,6 +23,10 @@ const Index = () => {
     } else {
       navigate("/signup");
     }
+  };
+
+  const handleWatchDemo = () => {
+    window.open('https://youtu.be/AKfOT3xVx4E', '_blank');
   };
 
   return (
@@ -73,9 +77,15 @@ const Index = () => {
               {currentUser ? "Go to Dashboard" : "Start Your Free Trial"}
               <ArrowRight className="ml-2 w-4 h-4" />
             </Button>
-            <Button size="lg" variant="outline">
-              Watch Demo
-            </Button>
+              <Button 
+                size="lg" 
+                variant="outline"
+                onClick={handleWatchDemo}
+                className="hover:bg-gray-50"
+              >
+                <Play className="mr-2 w-4 h-4" />
+                Watch Demo
+              </Button>
           </div>
         </div>
       </section>
